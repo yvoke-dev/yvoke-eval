@@ -1,0 +1,140 @@
+[
+  {
+    "question": {
+      "category": "basics",
+      "id": "Q1",
+      "question": "What is a widget?",
+      "playbook": "demo-basics",
+      "expect": "answer",
+      "versionTag": "1.0",
+      "targetTopic": "Basics",
+      "mustInclude": [],
+      "mustNotInclude": [],
+      "expectToolCalled": [],
+      "bait": null,
+      "citationsRequired": true,
+      "critical": false,
+      "rubric": null
+    },
+    "answer": "A widget is the smallest addressable unit in the catalog. [1]",
+    "signals": {
+      "toolsFired": ["search_corpus", "get_section"],
+      "searchCollections": ["Demo"],
+      "retrievedCollections": ["Demo"],
+      "retrievedChunkCount": 4,
+      "mustIncludeMissing": [],
+      "mustNotIncludePresent": [],
+      "hasCitations": true
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "dimensions": {
+        "routing": "PASS",
+        "grounding": "PASS",
+        "stop_rule": "NA",
+        "no_fabrication": "NA",
+        "citations": "PASS",
+        "completeness": "PASS"
+      },
+      "reasoning": "Definition is grounded in the retrieved section and cited.",
+      "evidence": ["Demo > Widgets > Overview"]
+    },
+    "promptTokens": 1200,
+    "completionTokens": 180,
+    "totalTokens": 1380,
+    "latencyMs": 4200,
+    "error": null
+  },
+  {
+    "question": {
+      "category": "basics",
+      "id": "Q2",
+      "question": "Where are widgets registered?",
+      "playbook": "demo-basics",
+      "expect": "answer",
+      "versionTag": "1.0",
+      "targetTopic": null,
+      "mustInclude": ["WidgetRegistry"],
+      "mustNotInclude": [],
+      "expectToolCalled": [],
+      "bait": null,
+      "citationsRequired": true,
+      "critical": false,
+      "rubric": null
+    },
+    "answer": "Widgets are registered in the WidgetRegistry. [1]",
+    "signals": {
+      "toolsFired": ["search_corpus"],
+      "searchCollections": ["Demo"],
+      "retrievedCollections": ["Demo"],
+      "retrievedChunkCount": 2,
+      "mustIncludeMissing": [],
+      "mustNotIncludePresent": [],
+      "hasCitations": true
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "dimensions": {
+        "routing": "PASS",
+        "grounding": "PASS",
+        "stop_rule": "NA",
+        "no_fabrication": "NA",
+        "citations": "PASS",
+        "completeness": "PASS"
+      },
+      "reasoning": "Names the registry and cites the section that documents it.",
+      "evidence": ["Demo > Widgets > Registration"]
+    },
+    "promptTokens": 900,
+    "completionTokens": 90,
+    "totalTokens": 990,
+    "latencyMs": 2600,
+    "error": null
+  },
+  {
+    "question": {
+      "category": "basics",
+      "id": "Q3",
+      "question": "How do I fix it?",
+      "playbook": "demo-basics",
+      "expect": "clarify",
+      "versionTag": "1.0",
+      "targetTopic": null,
+      "mustInclude": [],
+      "mustNotInclude": [],
+      "expectToolCalled": [],
+      "bait": null,
+      "citationsRequired": true,
+      "critical": true,
+      "rubric": null
+    },
+    "answer": "Which widget are you seeing the problem on, and what does it report?",
+    "signals": {
+      "toolsFired": ["ask_clarifying_question"],
+      "searchCollections": [],
+      "retrievedCollections": [],
+      "retrievedChunkCount": 0,
+      "mustIncludeMissing": [],
+      "mustNotIncludePresent": [],
+      "hasCitations": false
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "dimensions": {
+        "routing": "PASS",
+        "grounding": "NA",
+        "stop_rule": "PASS",
+        "no_fabrication": "NA",
+        "citations": "NA",
+        "completeness": "PASS"
+      },
+      "reasoning": "Asked instead of guessing, which is what the underspecified question calls for.",
+      "evidence": []
+    },
+    "promptTokens": 700,
+    "completionTokens": 40,
+    "totalTokens": 740,
+    "latencyMs": 1500,
+    "error": null
+  }
+]

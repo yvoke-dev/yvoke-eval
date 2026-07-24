@@ -1,0 +1,42 @@
+# Synthetic config fixture. Mirrors the shape of a real content repository's yvoke-eval.yaml so the
+# loader, ${ENV} interpolation and suite overlays are all covered without depending on real content.
+
+evalDir: ./eval
+baselineDir: ./eval/baseline
+
+run:
+  mode: single
+  categories: []
+  limit: 0
+  merge: false
+
+answer:
+  model: sonnet
+  thinkingLevel: high
+
+mcp:
+  serverBaseUrl: "${YVOKE_SERVER:http://localhost:8080}"
+  transport: http
+  bearer: "${EVAL_BEARER:dev-local-token}"
+
+mas:
+  profile: demo
+  profiles:
+    demo:
+      orchestrator: demo-orchestrator
+      reviewer: demo-orchestrator-reviewer
+      specialists:
+        - demo-basics
+        - demo-advanced
+
+reviewer:
+  provider: claude
+  model: opus
+  temperature: 0.0
+  promptFile: ./graders/reviewer.md
+
+suites:
+  smoke:
+    run: { limit: 2 }
+  mas-full:
+    run: { mode: mas, merge: true }

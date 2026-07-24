@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+
+# ReportWriter tests write run folders into the fixture eval dir and remove them again.
+test/fixtures/eval/runs/
+
+# Which eval content repo to run against (see resolve-config.sh) — machine-local.
+.eval-config

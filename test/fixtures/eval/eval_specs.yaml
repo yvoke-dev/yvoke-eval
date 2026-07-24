@@ -1,0 +1,24 @@
+# Synthetic spec fixture. Category keys here control which suites the parser runs, and each key must
+# have a matching eval_<category>.md beside it.
+
+basics:
+  Q1:
+    target: Basics
+  Q2:
+    must_include: [WidgetRegistry]
+  Q3:
+    expect: clarify
+    critical: true
+  Q4:
+    bait: PhantomTool.exe
+  Q5:
+    citations: false
+  Q6:
+    skip: true          # grader-only note, never runnable
+  Q7: {}
+
+advanced:
+  Q1:
+    expect_tool_called: [get_graph_neighbors]
+  Q2:
+    version_tag: "2.1"     # per-question version scoping; unset elsewhere, so those stay null
