@@ -2,12 +2,14 @@ import { query, type Options, type SDKUserMessage } from '@anthropic-ai/claude-a
 import type { AnswerBundle, EvalTask } from './AnswerBundle';
 import { bundleFromMessages, type StreamMessage } from './capture';
 import { buildMcpServers, type McpTarget } from './mcpServers';
-import { buildAllowedTools, buildCanUseTool, builtinTools } from './policy';
+import { buildAllowedTools, buildAutoApproveTools, buildCanUseTool, builtinTools } from './policy';
 import { thinkingBudget } from './thinking';
 import { sanitizedEnv } from './auth';
 
 export interface SdkRunnerOptions extends McpTarget {
   sandboxDir: string;
+  /** The deployment's web allow-list, injected into every WebSearch so the run matches production. */
+  webAllowedDomains?: string[];
   maxTurns: number;
 }
 
@@ -31,14 +33,19 @@ export class SdkAnswerRunner implements AnswerRunner {
     const options: Options = {
       systemPrompt: task.systemPrompt ?? '',
       mcpServers: buildMcpServers(this.opts),
-      allowedTools,
+      // Reduced: web tools are granted but not pre-approved, so canUseTool runs and scopes them.
+      allowedTools: buildAutoApproveTools(allowedTools),
       // Belt and braces with `tools`, mirroring yvoke-desktop: the shell is hard-blocked so
       // prompt-injected corpus content can never reach one. mcp__compute__* replaces it.
       disallowedTools: ['Bash'],
       tools: builtinTools(allowedTools),
-      canUseTool: buildCanUseTool(allowedTools, (question, opts) => {
-        clarify = { question, options: opts };
-      }),
+      canUseTool: buildCanUseTool(
+        allowedTools,
+        (question, opts) => {
+          clarify = { question, options: opts };
+        },
+        { webAllowedDomains: this.opts.webAllowedDomains },
+      ),
       settingSources: [],
       includePartialMessages: false,
       model: task.answerModel,

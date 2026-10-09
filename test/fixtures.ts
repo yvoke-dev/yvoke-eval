@@ -169,7 +169,10 @@ export function masDelegationStream(
 }
 
 export function mkDelegation(partial: Partial<DelegationInvocation> = {}): DelegationInvocation {
-  return { id: 'd0', subagentType: 'oim-getting-started', order: 0, isReviewer: false, ...partial };
+  const order = partial.order ?? 0;
+  // `batch` defaults to `order`, i.e. one delegation per assistant message = SEQUENTIAL. Defaulting it
+  // to 0 would make every multi-delegation fixture read as a parallel fan-out it never asserted.
+  return { id: 'd0', subagentType: 'oim-getting-started', order, batch: order, isReviewer: false, ...partial };
 }
 
 export function mkTrace(partial: Partial<OrchestrationTrace> = {}): OrchestrationTrace {
@@ -181,15 +184,22 @@ export function mkOrchestrationSignals(partial: Partial<OrchestrationSignals> = 
     delegatedSpecialists: [],
     delegationCount: 0,
     reviewRounds: 0,
+    revisionRounds: 0,
     reviewerVerdicts: [],
     reviewerVerdictsUnparsed: 0,
     reviewInvoked: false,
+    reviewEnforced: false,
+    reviewSkippedDespiteEnforcement: false,
     clarifyRequested: false,
     delegatedToExpectedSpecialist: null,
     unexpectedSpecialists: [],
     redundantDelegations: 0,
+    delegationPattern: 'none',
+    maxDelegationBatchWidth: 0,
+    expectedDelegationSatisfied: null,
     roundCapRespected: true,
     numTurns: null,
+    numTurnsPlausible: true,
     terminatedAbnormally: false,
     minReviewRoundsSatisfied: null,
     minReviewRoundsSatisfiable: true,

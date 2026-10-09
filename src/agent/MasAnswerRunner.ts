@@ -4,13 +4,21 @@ import { bundleFromMessages, type StreamMessage } from './capture';
 import { orchestrationTraceFromMessages } from './orchestrationCapture';
 import type { OrchestrationTrace } from './OrchestrationTrace';
 import { buildMcpServers, type McpTarget } from './mcpServers';
-import { buildCanUseTool, builtinTools } from './policy';
+import { buildAutoApproveTools, buildCanUseTool, builtinTools } from './policy';
 import { thinkingBudget } from './thinking';
 import { sanitizedEnv } from './auth';
-import { ORCHESTRATOR_AGENT, type ResolvedOrchestrator } from './orchestration';
+import {
+  needsReviewEnforcement,
+  ORCHESTRATOR_AGENT,
+  REVIEW_ENFORCEMENT_PROMPT,
+  REVIEWER_SUBAGENT,
+  type ResolvedOrchestrator,
+} from './orchestration';
 
 export interface MasRunnerOptions extends McpTarget {
   sandboxDir: string;
+  /** The deployment's web allow-list, injected into every WebSearch so the run matches production. */
+  webAllowedDomains?: string[];
 }
 
 /**
@@ -33,7 +41,8 @@ export class MasAnswerRunner {
       agents: this.orch.agents,
       forwardSubagentText: true,
       mcpServers: buildMcpServers(this.opts),
-      allowedTools: this.orch.allowedTools,
+      // Reduced: web tools are granted but not pre-approved, so canUseTool runs and scopes them.
+      allowedTools: buildAutoApproveTools(this.orch.allowedTools),
       // Belt and braces with `tools`, mirroring yvoke-desktop: the shell is hard-blocked so
       // prompt-injected corpus content can never reach one. mcp__compute__* replaces it.
       disallowedTools: ['Bash'],
@@ -43,8 +52,14 @@ export class MasAnswerRunner {
         (question, opts) => {
           clarify = { question, options: opts };
         },
-        // The orchestrator's whole job is delegating to specialists.
-        { allowDelegation: true },
+        // The orchestrator's whole job is delegating to specialists — but only to THESE ones. The
+        // SDK offers its own built-ins (claude, general-purpose, Explore, …) alongside them and has
+        // no option to suppress them; see CanUseToolOptions.delegationRoster.
+        {
+          allowDelegation: true,
+          delegationRoster: [...this.orch.specialistNames, REVIEWER_SUBAGENT],
+          webAllowedDomains: this.opts.webAllowedDomains,
+        },
       ),
       settingSources: [],
       includePartialMessages: false,
@@ -56,11 +71,25 @@ export class MasAnswerRunner {
     };
 
     const messages: StreamMessage[] = [];
-    for await (const m of query({ prompt: onceUser(modelContent), options })) {
-      messages.push(m as unknown as StreamMessage);
+    // The input generator must stay OPEN so a second turn can be pushed after the first result is
+    // seen; `onceUser` closed immediately, which is why a skipped review simply ended the run.
+    const turns = new UserTurns(modelContent);
+    let enforced = false;
+    for await (const m of query({ prompt: turns.stream(), options })) {
+      const msg = m as unknown as StreamMessage;
+      messages.push(msg);
+      if (msg.type !== 'result') continue;
+      // One shot, matching the client: enforce at most once, then let the run finish either way.
+      if (!enforced && needsReviewEnforcement(orchestrationTraceFromMessages(messages))) {
+        enforced = true;
+        turns.push(REVIEW_ENFORCEMENT_PROMPT);
+      } else {
+        turns.close();
+      }
     }
 
-    return assembleMasBundle(bundleFromMessages(messages), orchestrationTraceFromMessages(messages), clarify);
+    const trace: OrchestrationTrace = { ...orchestrationTraceFromMessages(messages), reviewEnforced: enforced };
+    return assembleMasBundle(bundleFromMessages(messages), trace, clarify);
   }
 }
 
@@ -83,10 +112,44 @@ export function assembleMasBundle(
   return bundle;
 }
 
-async function* onceUser(content: string): AsyncGenerator<SDKUserMessage> {
-  yield {
-    type: 'user',
-    message: { role: 'user', content },
-    parent_tool_use_id: null,
-  } as SDKUserMessage;
+/**
+ * A user-turn queue whose generator stays open until explicitly closed, so the runner can push a
+ * follow-up turn in response to what it saw in the stream. A plain `async function*` that yields
+ * once cannot do that: it completes, and the SDK ends the session.
+ */
+export class UserTurns {
+  private readonly queued: string[] = [];
+  private wake: (() => void) | null = null;
+  private done = false;
+
+  constructor(first: string) {
+    this.queued.push(first);
+  }
+
+  push(content: string): void {
+    this.queued.push(content);
+    this.wake?.();
+  }
+
+  close(): void {
+    this.done = true;
+    this.wake?.();
+  }
+
+  async *stream(): AsyncGenerator<SDKUserMessage> {
+    for (;;) {
+      while (this.queued.length > 0) {
+        yield {
+          type: 'user',
+          message: { role: 'user', content: this.queued.shift()! },
+          parent_tool_use_id: null,
+        } as SDKUserMessage;
+      }
+      if (this.done) return;
+      await new Promise<void>((resolve) => {
+        this.wake = resolve;
+      });
+      this.wake = null;
+    }
+  }
 }

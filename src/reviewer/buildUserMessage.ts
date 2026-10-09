@@ -35,6 +35,7 @@ export function buildUserMessage(
   out.push(`retrieved_chunk_count: ${s.retrievedChunkCount}`);
   out.push(`must_include_missing: ${fmtList(s.mustIncludeMissing)}`);
   out.push(`must_not_include_present: ${fmtList(s.mustNotIncludePresent)}`);
+  out.push(`expected_tools_missing: ${fmtList(s.expectedToolsMissing)}`);
   out.push(`answer_has_citations: ${s.hasCitations}`);
 
   out.push('');

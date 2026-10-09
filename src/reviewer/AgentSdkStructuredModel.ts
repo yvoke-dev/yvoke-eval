@@ -16,6 +16,8 @@ export interface AgentSdkModelOptions {
  * subscription auth vs the old Gemini responseSchema judge).
  */
 export class AgentSdkStructuredModel implements StructuredModel {
+  public resolvedModel?: string;
+
   constructor(private readonly opts: AgentSdkModelOptions) {}
 
   async complete(input: {
@@ -47,10 +49,14 @@ export class AgentSdkStructuredModel implements StructuredModel {
     for await (const m of query({ prompt: onceUser(input.user), options })) {
       const msg = m as unknown as {
         type: string;
+        subtype?: string;
+        model?: string;
         result?: string;
         message?: { content?: unknown };
       };
-      if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
+      if (msg.type === 'system' && msg.subtype === 'init' && typeof msg.model === 'string' && msg.model) {
+        this.resolvedModel = msg.model;
+      } else if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
         for (const b of msg.message.content as Array<{ type?: string; text?: string }>) {
           if (b.type === 'text' && b.text) parts.push(b.text);
         }

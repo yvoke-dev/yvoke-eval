@@ -13,6 +13,7 @@ export interface StreamMessage {
   parent_tool_use_id?: string | null;
   message?: { role?: string; content?: unknown };
   session_id?: string;
+  model?: string;
   usage?: Record<string, unknown>;
   result?: string;
   total_cost_usd?: number;
@@ -48,6 +49,7 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
   let costUsd: number | undefined;
   let numTurns: number | undefined;
   let sessionId: string | undefined;
+  let resolvedModel: string | undefined;
 
   for (const msg of messages) {
     const isSubAgent = msg.parent_tool_use_id != null;
@@ -55,6 +57,9 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
 
     if (msg.type === 'system' && msg.subtype === 'init') {
       sessionId = msg.session_id;
+      if (typeof msg.model === 'string' && msg.model) {
+        resolvedModel = msg.model;
+      }
     } else if (msg.type === 'assistant') {
       for (const b of content) {
         if (b.type === 'text' && typeof b.text === 'string' && b.text) {
@@ -114,7 +119,7 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
     promptTokens,
     completionTokens,
     totalTokens: promptTokens + completionTokens,
-    providerMeta: { sessionId, costUsd, numTurns, isError },
+    providerMeta: { sessionId, costUsd, numTurns, isError, resolvedModel },
   };
 }
 

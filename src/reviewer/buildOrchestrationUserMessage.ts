@@ -28,27 +28,46 @@ export function buildOrchestrationUserMessage(
   out.push(`delegation_count: ${s.delegationCount}`);
   out.push(`unexpected_specialists: ${fmtList(s.unexpectedSpecialists)}`);
   out.push(`redundant_delegations: ${s.redundantDelegations}`);
+  out.push(`delegation_pattern: ${s.delegationPattern}   (observed: none|single|parallel|sequential|mixed)`);
+  out.push(`max_delegation_batch_width: ${s.maxDelegationBatchWidth}`);
+  out.push(
+    `expected_delegation_satisfied: ${s.expectedDelegationSatisfied === null ? 'NA (unset)' : s.expectedDelegationSatisfied}`,
+  );
   out.push(`delegated_to_expected_specialist: ${s.delegatedToExpectedSpecialist === null ? 'NA (unauthored)' : s.delegatedToExpectedSpecialist}`);
   out.push(`clarify_requested: ${s.clarifyRequested}`);
-  out.push(`review_rounds: ${s.reviewRounds}`);
+  out.push(`review_rounds: ${s.reviewRounds}   (reviewer delegations)`);
+  out.push(`revision_rounds: ${s.revisionRounds}   (re-prompts = review_rounds - 1; THIS is what maxReviewRounds budgets)`);
   out.push(`review_invoked: ${s.reviewInvoked}`);
+  out.push(
+    `review_enforced: ${s.reviewEnforced}` +
+      (s.reviewEnforced ? '   (the orchestrator did NOT review on its own — the runtime had to nudge it)' : ''),
+  );
+  out.push(
+    `review_skipped_despite_enforcement: ${s.reviewSkippedDespiteEnforcement}` +
+      (s.reviewSkippedDespiteEnforcement ? '   (ships UNREVIEWED — the nudge is one-shot)' : ''),
+  );
   out.push(`reviewer_verdicts: ${fmtList(s.reviewerVerdicts)}`);
   out.push(`reviewer_verdicts_unparsed: ${s.reviewerVerdictsUnparsed}`);
   out.push(`round_cap_respected: ${s.roundCapRespected}`);
   out.push(`num_turns: ${s.numTurns ?? 'unknown'}`);
+  out.push(
+    `num_turns_plausible: ${s.numTurnsPlausible}` +
+      (s.numTurnsPlausible ? '' : '   (num_turns is BELOW the delegating-turn count — do not read clean termination from it)'),
+  );
   out.push(`terminated_abnormally: ${s.terminatedAbnormally}`);
   out.push(`min_review_rounds_satisfied: ${s.minReviewRoundsSatisfied === null ? 'NA (unset)' : s.minReviewRoundsSatisfied}`);
   out.push(`min_review_rounds_satisfiable: ${s.minReviewRoundsSatisfiable}`);
 
   out.push('');
-  out.push('## Delegation order (order · subagent_type · isReviewer · verdict)');
+  out.push('## Delegation order (order · batch · subagent_type · isReviewer · verdict)');
+  out.push('Delegations sharing a batch went out together in one assistant message (parallel).');
   if (trace.delegations.length === 0) {
     out.push('(no delegations)');
   } else {
     for (const d of trace.delegations) {
       const v = d.isReviewer ? `  verdict=${d.verdict ?? 'UNPARSED'}` : '';
       const task = d.prompt ? `  task="${truncate(d.prompt, 100)}"` : '';
-      out.push(`${d.order}. ${d.subagentType}  isReviewer=${d.isReviewer}${v}${task}`);
+      out.push(`${d.order}. batch=${d.batch}  ${d.subagentType}  isReviewer=${d.isReviewer}${v}${task}`);
     }
   }
 

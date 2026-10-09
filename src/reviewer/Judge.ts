@@ -16,6 +16,7 @@ export interface JudgeRequest {
 /** The LLM-as-judge. Claude by default (ClaudeJudge); Gemini optional for cross-family audits. */
 export interface Judge {
   review(req: JudgeRequest): Promise<Verdict>;
+  readonly resolvedModel?: string;
 }
 
 /**
@@ -24,6 +25,7 @@ export interface Judge {
  * tool-use) now; a subscription-auth Agent-SDK-backed model lands with the answer path in P2.
  */
 export interface StructuredModel {
+  readonly resolvedModel?: string;
   complete(input: {
     system: string;
     user: string;
@@ -86,6 +88,10 @@ export class ClaudeJudge implements Judge {
     private readonly model: StructuredModel,
     private readonly opts: ClaudeJudgeOptions,
   ) {}
+
+  get resolvedModel(): string | undefined {
+    return this.model.resolvedModel;
+  }
 
   async review(req: JudgeRequest): Promise<Verdict> {
     const user = `${buildUserMessage(req.question, req.answer, req.signals, req.evidence)}\n\n---\n${VERDICT_CONTRACT}`;

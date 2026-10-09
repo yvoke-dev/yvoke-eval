@@ -39,6 +39,7 @@ async function main(): Promise<void> {
       limit: { type: 'string' },
       'answer-model': { type: 'string' },
       'reviewer-model': { type: 'string' },
+      thinking: { type: 'string' },
       mode: { type: 'string' },
       eval: { type: 'string' },
       expect: { type: 'string' },
@@ -138,6 +139,18 @@ function cmdPromote(cfg: EvalConfig, values: Record<string, unknown>, positional
 }
 
 /**
+ * Normalizes user-friendly model aliases (e.g. `haiku-5.5`, `haiku 5.5`, `sonnet-5.5`)
+ * to their concrete Claude Agent SDK model identifiers (`claude-haiku-5-5`, etc.).
+ */
+export function normalizeModelName(name: string): string {
+  const trimmed = name.trim();
+  if (/^(claude-)?haiku[-\s.]?5[-\s.]?5$/i.test(trimmed)) return 'claude-haiku-5-5';
+  if (/^(claude-)?sonnet[-\s.]?5[-\s.]?5$/i.test(trimmed)) return 'claude-sonnet-5-5';
+  if (/^(claude-)?opus[-\s.]?5[-\s.]?5$/i.test(trimmed)) return 'claude-opus-5-5';
+  return trimmed;
+}
+
+/**
  * Resolve a config + CLI flags into a RunConfig. `contentRoot` is the directory holding the config
  * file; every relative path in `cfg` resolves against it.
  */
@@ -162,13 +175,16 @@ export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, co
     mode,
     evalIntent,
     mas: mode === 'mas' ? resolveMas(cfg) : undefined,
+    // Absent → empty, which makes web access fail closed in canUseTool rather than reaching the
+    // open web. An eval is only worth its verdict if the answer ran under the shipped constraints.
+    webAllowedDomains: cfg.web?.allowedDomains ?? [],
     categories: (values.category as string[] | undefined) ?? cfg.run?.categories ?? [],
     expect: (values.expect as string | undefined) ?? null,
     limit: limitFlag ?? cfg.run?.limit ?? 0,
     merge: (values.merge as boolean | undefined) ?? cfg.run?.merge ?? false,
-    answerModel: (values['answer-model'] as string | undefined) ?? cfg.answer?.model ?? 'sonnet',
-    thinkingLevel: (cfg.answer?.thinkingLevel as ThinkingLevel) ?? 'low',
-    reviewerModel: (values['reviewer-model'] as string | undefined) ?? cfg.reviewer?.model ?? 'opus',
+    answerModel: normalizeModelName((values['answer-model'] as string | undefined) ?? cfg.answer?.model ?? 'sonnet'),
+    thinkingLevel: ((values['thinking'] ?? cfg.answer?.thinkingLevel) as ThinkingLevel) ?? 'low',
+    reviewerModel: normalizeModelName((values['reviewer-model'] as string | undefined) ?? cfg.reviewer?.model ?? 'opus'),
     mcp: {
       serverBaseUrl: cfg.mcp?.serverBaseUrl ?? 'http://localhost:8080',
       bearer: cfg.mcp?.bearer ?? 'dev-local-token',
@@ -219,7 +235,7 @@ function resolveMas(cfg: EvalConfig): { profile: OrchestratorProfile; tuning: Or
     specialist: { model: 'sonnet', thinkingLevel: 'medium' },
   };
   const role = (r: { model: string; thinkingLevel: string }) => ({
-    model: r.model,
+    model: normalizeModelName(r.model),
     thinkingLevel: r.thinkingLevel as ThinkingLevel,
   });
   return {

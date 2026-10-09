@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { mcpTool } from './fixtures';
 import {
@@ -62,10 +63,12 @@ describe('buildOrchestrator', () => {
     expect(specialist.tools).toContain(mcpTool('search_corpus'));
     expect(specialist.tools).not.toContain('Bash'); // never granted, whatever the playbook says
 
-    expect(r.agents[REVIEWER_SUBAGENT].tools).toEqual([
-      mcpTool('verify_citations'),
-      mcpTool('get_section'),
-    ]);
+    // Exactly what the client grants and what the reviewer playbook says it has — "that is your
+    // only tool". `get_section` used to be granted here as well, which graded a reviewer holding a
+    // capability production withholds: it returns the whole section around a passage, so claims get
+    // judged against neighbouring text no specialist retrieved.
+    expect(r.agents[REVIEWER_SUBAGENT].tools).toEqual([mcpTool('verify_citations')]);
+    expect(r.agents[REVIEWER_SUBAGENT].tools).not.toContain(mcpTool('get_section'));
   });
 
   it('allowedTools unions delegation + specialist tools + reviewer tools', async () => {
@@ -137,5 +140,69 @@ describe('roster resolution', () => {
 
   it('accepts a fully resolvable roster', async () => {
     await expect(buildOrchestrator(profile, tuning, fakePrompts, null)).resolves.toBeDefined();
+  });
+});
+
+/**
+ * SDK-upgrade guard. The Task tool's default flipped between 0.3.170 (`run_in_background: true runs
+ * the agent asynchronously` — opt-in) and 0.3.218 (`Subagents run in the background by default`). On
+ * 0.3.218 every delegation returned an 802-character launch receipt instead of an answer, and the
+ * whole orchestration surface degraded silently: blind re-delegation, an unparseable reviewer verdict
+ * (its result was a receipt too), and reviewers approving answers while stating they had no evidence.
+ * These assert the declaration is present so a future bump fails here rather than in an eval run.
+ */
+describe('buildOrchestrator — every agent delegates synchronously', () => {
+  it('declares background: false on the orchestrator, every specialist, and the reviewer', async () => {
+    const resolved = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const names = Object.keys(resolved.agents);
+    expect(names.length).toBeGreaterThan(2); // orchestrator + specialists + reviewer
+    for (const name of names) {
+      expect(resolved.agents[name].background, `${name} must not be backgrounded`).toBe(false);
+    }
+  });
+
+  it('tells the orchestrator to delegate synchronously and to reject a launch receipt', async () => {
+    const resolved = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const adapter = resolved.agents[ORCHESTRATOR_AGENT].prompt as string;
+    expect(adapter).toContain('run_in_background');
+    expect(adapter).toContain('Async agent launched successfully');
+    // A receipt must be read as a failed call, not as the specialist having answered.
+    expect(adapter).toMatch(/FAILED call/i);
+  });
+});
+
+/**
+ * The reviewer's prompt is playbook + adapter, and the shared playbook's "## Verdict" section is
+ * written around a `submit_review` TOOL that neither this harness nor the client provides (the
+ * server product does). So the reviewer used to be told to call a tool that does not exist, then
+ * told two sentences later to emit plain text — and on 3 Sep 2026 it obeyed the playbook's shape,
+ * rendering its payload as prose ("All 5 citation ids were checked… | citation | status |") with no
+ * verdict token anywhere. Parsed correctly on only 1 of 3 reviews.
+ *
+ * The adapter must therefore CANCEL the playbook's instruction by name, not merely offer a rival
+ * one. The playbook itself is deliberately left alone: it is correct for the server surface.
+ */
+describe('REVIEWER_ADAPTER — cancels the playbook’s submit_review contract', () => {
+  it('names submit_review and the playbook section it overrides', async () => {
+    const r = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const prompt = r.agents[REVIEWER_SUBAGENT].prompt as string;
+    expect(prompt).toContain('submit_review');
+    expect(prompt).toContain('## Verdict');
+    expect(prompt).toMatch(/no .submit_review. tool/i);
+  });
+
+  it('keeps the rest of the playbook in force rather than discarding it wholesale', async () => {
+    const r = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const prompt = r.agents[REVIEWER_SUBAGENT].prompt as string;
+    expect(prompt).toMatch(/Everything else in the playbook stands unchanged/i);
+    // The playbook text itself is still there — the adapter overrides, it does not replace.
+    expect(prompt).toContain('PROMPT(oim-orchestrator-reviewer)');
+  });
+
+  it('states the consequence of an unreadable verdict, matching how the runtime treats it', () => {
+    // The client turns an unparseable verdict into a revision round, so this is not a scare tactic.
+    const src = readFileSync(new URL('../src/agent/orchestration.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/cannot be read/i);
+    expect(src).toMatch(/rejection with no feedback/i);
   });
 });

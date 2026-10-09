@@ -62,3 +62,74 @@ describe('gradeOrchestration', () => {
     expect(r.totalTokens).toBe(0);
   });
 });
+
+/**
+ * Trace persistence. The derived signals cannot distinguish a reviewer that broke its first-line
+ * contract from a capture that resolved the wrong text — `reviewer_verdicts_unparsed: 1` says only
+ * that the verdict was unreadable. Q2/Q3 of the 3 Sep run hit exactly that and were undiagnosable
+ * because the record kept the signals and dropped the trace.
+ */
+describe('gradeOrchestration — persists the trace the grader was shown', () => {
+  const traceWithUnparsedVerdict = mkTrace({
+    delegations: [
+      mkDelegation({ id: 'd1', subagentType: 'oim-field-qa', order: 0, resultText: 'field answer' }),
+      mkDelegation({
+        id: 'r1',
+        subagentType: 'reviewer',
+        isReviewer: true,
+        order: 1,
+        // No `verdict`: this is the shape that produced reviewer_verdicts_unparsed=1, and the text
+        // below is the whole point of persisting — it is what names the cause.
+        resultText: 'I reviewed the answer and it looks well supported.\nAPPROVED',
+      }),
+    ],
+    reviewRounds: 1,
+    specialistCallCount: 1,
+  });
+
+  it('keeps every delegation with its returned text, so an unparsed verdict can be explained', async () => {
+    const r = await gradeOrchestration(
+      mkQuestion(),
+      mkBundle({ answer: 'x', orchestration: traceWithUnparsedVerdict }),
+      passJudge,
+      1,
+      CAPS,
+    );
+    expect(r.orchestrationSignals?.reviewerVerdictsUnparsed).toBe(1);
+    const reviewer = r.orchestration?.delegations.find((d) => d.isReviewer);
+    expect(reviewer?.verdict).toBeUndefined();
+    // The diagnosis the signals alone cannot give: the verdict was on line 2, not line 1.
+    expect(reviewer?.resultText).toContain('APPROVED');
+    expect(r.orchestration?.delegations).toHaveLength(2);
+  });
+
+  it('persists the trace on the ERROR branch too — a failed grading is when it matters most', async () => {
+    const throwing: OrchestrationJudge = {
+      async review() {
+        throw new Error('boom');
+      },
+    };
+    const r = await gradeOrchestration(
+      mkQuestion(),
+      mkBundle({ answer: 'x', orchestration: traceWithUnparsedVerdict }),
+      throwing,
+      1,
+      CAPS,
+    );
+    expect(r.verdict.verdict).toBe('ERROR');
+    expect(r.orchestration?.delegations).toHaveLength(2);
+  });
+
+  it('survives a JSON round-trip, which is how it reaches results.json', async () => {
+    const r = await gradeOrchestration(
+      mkQuestion(),
+      mkBundle({ answer: 'x', orchestration: traceWithUnparsedVerdict }),
+      passJudge,
+      1,
+      CAPS,
+    );
+    const back = JSON.parse(JSON.stringify(r));
+    expect(back.orchestration.delegations[1].resultText).toContain('APPROVED');
+    expect(back.orchestration.reviewRounds).toBe(1);
+  });
+});

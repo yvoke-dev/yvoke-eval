@@ -31,6 +31,8 @@ export interface RunConfig {
   thinkingLevel: ThinkingLevel; // single mode
   mas?: { profile: OrchestratorProfile; tuning: OrchestratorTuning }; // mas mode
   mcp: { serverBaseUrl: string; bearer: string; transport: 'http' | 'sse' };
+  /** The deployment's web allow-list; empty/absent makes web access fail closed. */
+  webAllowedDomains: string[];
   reviewerModel: string;
   graderPath: string;
   /** Only needed for `evalIntent: 'orchestration'`; null for every other intent. */
@@ -121,13 +123,20 @@ export async function runSuite(
     if (!cfg.mas) throw new Error('mas mode requires a resolved profile (cfg.mas).');
     const orch = await buildOrchestrator(cfg.mas.profile, cfg.mas.tuning, prompts, systemPrompt);
     log(`Orchestrator ready: ${orch.specialistNames.length} specialists (${orch.specialistNames.join(', ')}).`);
-    const masRunner = new MasAnswerRunner({ ...cfg.mcp, sandboxDir: cfg.sandboxDir }, orch);
+    const masRunner = new MasAnswerRunner({ ...cfg.mcp, sandboxDir: cfg.sandboxDir, webAllowedDomains: cfg.webAllowedDomains }, orch);
     produce = (q) => masRunner.run(q.question);
     answerModelLabel = cfg.mas.tuning.orchestrator.model;
     answerProvider = 'sdk-mas';
     thinkingLabel = cfg.mas.tuning.orchestrator.thinkingLevel;
   } else {
-    const runner = deps.answerRunner ?? new SdkAnswerRunner({ ...cfg.mcp, sandboxDir: cfg.sandboxDir, maxTurns: cfg.maxTurns });
+    const runner =
+      deps.answerRunner ??
+      new SdkAnswerRunner({
+        ...cfg.mcp,
+        sandboxDir: cfg.sandboxDir,
+        maxTurns: cfg.maxTurns,
+        webAllowedDomains: cfg.webAllowedDomains,
+      });
     produce = async (q) => {
       const task = await buildEvalTask(q, prompts, {
         answerModel: cfg.answerModel,
@@ -143,12 +152,16 @@ export async function runSuite(
 
   const results: EvalResult[] = [];
   let n = 0;
+  let resolvedWorkerModel: string | undefined;
   for (const q of questions) {
     n++;
     const t0 = Date.now();
     let result: EvalResult;
     try {
       const bundle = await produce(q);
+      if (!resolvedWorkerModel && typeof bundle.providerMeta?.resolvedModel === 'string') {
+        resolvedWorkerModel = bundle.providerMeta.resolvedModel;
+      }
       result = orchestrationMode
         ? await gradeOrchestration(q, bundle, orchJudge!, Date.now() - t0, {
             maxReviewRounds: cfg.mas!.tuning.maxReviewRounds,
@@ -166,18 +179,24 @@ export async function runSuite(
   await prompts.close();
 
   const sutSha = sanitizeSha(prompts.serverVersion()?.version);
+  const activeJudge = orchestrationMode ? orchJudge : judge;
+  const resolvedJudgeModel = activeJudge?.resolvedModel ?? (judge as { resolvedModel?: string })?.resolvedModel;
+
   const meta = {
     answerModel: answerModelLabel,
+    resolvedAnswerModel: resolvedWorkerModel ?? null,
     answerProvider,
     evalIntent: cfg.evalIntent,
     sdkModel: answerModelLabel,
     sdkVersion: agentSdkVersion(),
     reviewerModel: cfg.reviewerModel,
+    resolvedReviewerModel: resolvedJudgeModel ?? null,
     reviewerProvider: 'claude',
     thinkingLevel: thinkingLabel,
     systemPromptName: systemPrompt ? SYSTEM_PROMPT_NAME : null,
     graderPromptSha: grader.sha,
     gitSha: sutSha,
+    masReviewerModel: cfg.mode === 'mas' ? (cfg.mas?.tuning.reviewer.model ?? null) : null,
   };
 
   const writer = new ReportWriter();
@@ -247,6 +266,7 @@ function errorResult(q: EvalQuestion, msg: string, latencyMs: number): EvalResul
       retrievedChunkCount: 0,
       mustIncludeMissing: q.mustInclude,
       mustNotIncludePresent: [],
+      expectedToolsMissing: [],
       hasCitations: false,
     },
     verdict: { verdict: 'ERROR', dimensions: {}, reasoning: msg, evidence: [] },

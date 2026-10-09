@@ -28,6 +28,12 @@ export interface EvalConfig {
   run: { mode: string; eval?: string; categories: string[]; limit: number; merge: boolean };
   answer: { model: string; thinkingLevel: string };
   mcp: { serverBaseUrl: string; transport: string; bearer: string };
+  /**
+   * The deployment's web allow-list. Content-repo config, because which domains are worth searching
+   * belongs to a knowledge base rather than to the harness — the same reason the client ships it in
+   * settings.json rather than letting a user edit it.
+   */
+  web?: { allowedDomains?: string[] };
   mas?: MasConfig;
   reviewer: {
     provider: string;

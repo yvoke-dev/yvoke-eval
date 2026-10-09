@@ -11,7 +11,36 @@ import type { AnswerBundle, ToolInvocation } from '../agent/AnswerBundle';
  * collection name without the DB, so `retrievedCollections` is empty for it; routing should be judged
  * on `searchCollections ∪ retrievedCollections`, and `get_section` firing already proves a real read.
  */
-const CITATION = /\[\d+\]/;
+/**
+ * What counts as a citation in an answer.
+ *
+ * This must track the **deployed** convention rather than a historical one, because the grader is
+ * handed `answer_has_citations` and reads a false there as a citation failure. It had drifted: this
+ * recognised only numbered `[1]` markers, while the shipped `default-chat` system prompt now writes
+ * bare ids inline and says outright *"Do not number citations and do not write a `## References`
+ * section"*. So every correctly-cited answer reported `hasCitations: false` and was capped at PARTIAL
+ * on the citations dimension however good it was — the harness was measuring the one format the
+ * prompt forbids.
+ *
+ * The accepted forms mirror the renderer's own `citationRehype.ts`, which is the product's authority
+ * on what a citation is:
+ *  - a **bare id** — `[8f7c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071]`, hyphenated or 32-hex — the current form;
+ *  - the **kinded legacy** forms `[chunk_id=…]` / `[document_id=…]` / `[file=…]`, still emitted by
+ *    some playbooks and still resolvable;
+ *  - a **markdown link**, which is how a *web* source is cited: a search result carries no chunk and
+ *    no document, so there is no id to write and a link is the only honest attribution;
+ *  - a `## References` section, kept so an older recorded run still reads as cited rather than being
+ *    silently regraded by this change.
+ */
+const UUID_HEX =
+  '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32}';
+const CITATION = new RegExp(
+  [
+    '\\[\\d+\\]',
+    `\\[\\s*(?:(?:chunk_id|document_id|file)=[a-zA-Z0-9_.-]+|${UUID_HEX})`,
+    '\\[[^\\]\\n]+\\]\\(https?://[^)\\s]+\\)',
+  ].join('|'),
+);
 const SEARCHED_HEADER = /^Searched\s+\*\*(.+?)\*\*/m;
 
 export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Signals {
@@ -39,6 +68,12 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
   const mustIncludeMissing = question.mustInclude.filter((s) => !hay.includes(s.toLowerCase()));
   const mustNotIncludePresent = question.mustNotInclude.filter((s) => hay.includes(s.toLowerCase()));
   const hasCitations = CITATION.test(answer) || answer.includes('## References');
+  // Compared on the bare name, because the trace is stripped of the server prefix while a spec
+  // names tools the way a playbook does.
+  const firedBare = new Set(toolsFired.map((t) => t.toLowerCase()));
+  const expectedToolsMissing = question.expectToolCalled.filter(
+    (t) => !firedBare.has(stripPrefix(t).toLowerCase()),
+  );
 
   return {
     toolsFired,
@@ -47,6 +82,7 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
     retrievedChunkCount: chunkIds.length,
     mustIncludeMissing,
     mustNotIncludePresent,
+    expectedToolsMissing,
     hasCitations,
   };
 }

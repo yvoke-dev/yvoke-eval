@@ -29,6 +29,7 @@ function cfg(overrides: Partial<RunConfig> = {}): RunConfig {
     evalIntent: 'specialist',
     categories: ['basics'],
     expect: null,
+    webAllowedDomains: [],
     limit: 1,
     merge: false,
     answerModel: 'sonnet',
