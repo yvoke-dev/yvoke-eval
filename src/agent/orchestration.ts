@@ -41,6 +41,7 @@ export interface OrchestratorProfile {
 export interface RoleConfig {
   model: string;
   thinkingLevel: ThinkingLevel;
+  configuredModel?: string;
 }
 
 export interface OrchestratorTuning {
@@ -137,9 +138,9 @@ and a prompt containing all three of:
 The reviewer cannot see this conversation and validates ONLY against what you paste under (3); a review
 request without that section will be rejected for missing evidence.
 
-If the reviewer replies \`REJECTED\`, the runtime hands the feedback (and the evidence) back to you for a
-revision round — up to ${maxReviewRounds}. Fix the answer and re-review; do not argue with the reviewer.
-Never add a "did not pass review" note yourself: the runtime appends one if the rounds run out.
+If the reviewer replies \`REJECTED\`, revise and re-review — but no more than ${maxReviewRounds} review rounds;
+after that, deliver your best answer prefixed with a short "⚠️ This answer did not fully pass review" note.
+Do not argue with the reviewer — fix the answer.
 
 To ask a clarifying question on an ambiguous query or invalid version/pair, call the **\`ask_clarifying_question\`**
 tool directly (it is granted to you). Do not delegate to specialists when the question is ambiguous or requests

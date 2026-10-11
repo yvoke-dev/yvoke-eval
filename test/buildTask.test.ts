@@ -176,5 +176,9 @@ describe('buildEvalTask & resolvePlaybookSystemPrompt — Designated System Prom
       'default-chat': 'FALLBACK PROMPT',
     });
     await expect(resolvePlaybookSystemPrompt('broken', failingClient, 'FALLBACK PROMPT')).resolves.toBe('FALLBACK PROMPT');
+
+    // 5. Explicit null fallback returns null and does NOT fall through to default-chat
+    await expect(resolvePlaybookSystemPrompt(undefined, client, null)).resolves.toBeNull();
+    await expect(resolvePlaybookSystemPrompt('nonexistent', client, null)).resolves.toBeNull();
   });
 });

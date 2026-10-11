@@ -194,7 +194,8 @@ describe('bundleFromMessages', () => {
         type: 'result',
         result: `FINAL: widget is blue [chunk_id=${CHUNK}].`,
         usage: { input_tokens: 20, output_tokens: 7 },
-        total_cost_usd: 0.002,
+        // SDK total_cost_usd is cumulative across turns in streaming sessions — each result carries the running total
+        total_cost_usd: 0.0025,
         num_turns: 1,
         is_error: false,
       },
@@ -206,7 +207,7 @@ describe('bundleFromMessages', () => {
     expect(b.promptTokens).toBe(30);
     expect(b.completionTokens).toBe(12);
     expect(b.totalTokens).toBe(42);
-    expect(b.providerMeta.costUsd).toBeCloseTo(0.003);
+    expect(b.providerMeta.costUsd).toBeCloseTo(0.0025, 4);
     expect(b.providerMeta.numTurns).toBe(2);
     expect(b.retrievedChunkIds).toEqual([CHUNK]);
   });

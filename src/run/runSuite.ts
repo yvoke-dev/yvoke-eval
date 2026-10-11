@@ -199,7 +199,10 @@ export async function runSuite(
     systemPromptName: systemPrompt ? SYSTEM_PROMPT_NAME : null,
     graderPromptSha: grader.sha,
     gitSha: sutSha,
-    masReviewerModel: cfg.mode === 'mas' ? (cfg.mas?.tuning.reviewer.model ?? null) : null,
+    masReviewerModel:
+      cfg.mode === 'mas'
+        ? (cfg.mas?.tuning.reviewer.configuredModel ?? cfg.mas?.tuning.reviewer.model ?? null)
+        : null,
     resolvedMasReviewerModel:
       cfg.mode === 'mas' && cfg.mas?.tuning.reviewer.model
         ? normalizeModelName(cfg.mas.tuning.reviewer.model)

@@ -102,8 +102,9 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
       totalOutputTokens += num(u.output_tokens);
       if (typeof msg.result === 'string') resultText = msg.result;
       if (msg.is_error === true) isError = true;
+      // total_cost_usd is cumulative across turns in streaming sessions — keep latest running total
       if (typeof msg.total_cost_usd === 'number') {
-        costUsd = (costUsd ?? 0) + msg.total_cost_usd;
+        costUsd = msg.total_cost_usd;
       }
       if (typeof msg.num_turns === 'number') {
         numTurns = (numTurns ?? 0) + msg.num_turns;

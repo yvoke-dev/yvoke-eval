@@ -32,8 +32,8 @@ export async function resolvePlaybookSystemPrompt(
     }
   }
 
-  // Fallback to default-chat
-  if (defaultPrompt !== undefined && defaultPrompt !== null) {
+  // Fallback to defaultPrompt if explicitly provided (even if null or empty)
+  if (defaultPrompt !== undefined) {
     return defaultPrompt;
   }
   if (client) {

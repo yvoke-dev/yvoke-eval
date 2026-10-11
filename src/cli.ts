@@ -260,6 +260,7 @@ function resolveMas(cfg: EvalConfig): { profile: OrchestratorProfile; tuning: Or
   const role = (r: { model: string; thinkingLevel: string }) => ({
     model: normalizeModelName(r.model),
     thinkingLevel: parseThinkingLevel(r.thinkingLevel),
+    configuredModel: r.model.trim(),
   });
   return {
     profile: {

@@ -242,6 +242,32 @@ describe('buildOrchestrator — designated system prompt resolution', () => {
     expect(r.agents['oim-developer-api'].prompt).toContain('DEFAULT_BASE');
     expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('REVIEWER CUSTOM PROMPT');
   });
+
+  it('reviewer runs on playbook alone when no designated prompt, even when promptClient returns default-chat', async () => {
+    const promptsWithMeta: McpPromptInfo[] = [
+      { name: 'oim-orchestrator', title: 'Orchestrator', description: 'desc', tools: [], codeExecution: false },
+      { name: 'oim-orchestrator-reviewer', title: 'Reviewer', description: 'desc', tools: [], codeExecution: false },
+      { name: 'oim-getting-started', title: 'Getting Started', description: 'desc', tools: ['search_corpus'], codeExecution: false },
+      { name: 'oim-developer-api', title: 'Dev API', description: 'desc', tools: ['search_graph_entities'], codeExecution: false },
+    ];
+    const source = {
+      list: async () => promptsWithMeta,
+      getText: async (name: string) => `PROMPT(${name})`,
+    } as unknown as McpPrompts;
+
+    const mockClient = {
+      get: async (name: string) => {
+        if (name === 'default-chat') return 'DEFAULT CHAT BASE';
+        return null;
+      },
+    } as unknown as SystemPromptClient;
+
+    const r = await buildOrchestrator(profile, tuning, source, 'DEFAULT_BASE', mockClient);
+    expect(r.agents[ORCHESTRATOR_AGENT].prompt).toContain('DEFAULT_BASE');
+    expect(r.agents[REVIEWER_SUBAGENT].prompt).not.toContain('DEFAULT CHAT BASE');
+    expect(r.agents[REVIEWER_SUBAGENT].prompt).not.toContain('DEFAULT_BASE');
+    expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('PROMPT(oim-orchestrator-reviewer)');
+  });
 });
 
 describe('EVIDENCE_HEADING and contractual review prompts', () => {

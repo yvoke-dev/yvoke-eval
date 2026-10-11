@@ -34,10 +34,11 @@ import type { AnswerBundle, ToolInvocation } from '../agent/AnswerBundle';
  */
 const UUID_HEX =
   '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32}';
+const CITE_ITEM = `(?:(?:chunk_id|document_id|file)=[a-zA-Z0-9_.-]+|${UUID_HEX})`;
 const CITATION = new RegExp(
   [
     '\\[\\d+\\]',
-    `\\[\\s*(?:(?:chunk_id|document_id|file)=[a-zA-Z0-9_.-]+|${UUID_HEX})\\s*\\]`,
+    `\\[\\s*${CITE_ITEM}(?:\\s*,\\s*${CITE_ITEM})*\\s*\\]`,
     '\\[[^\\]\\n]+\\]\\(https?://[^)\\s]+\\)',
   ].join('|'),
 );

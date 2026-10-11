@@ -29,6 +29,26 @@ describe('extractSignals', () => {
     expect(s.hasCitations).toBe(false);
   });
 
+  it('accepts comma-separated citation marker groups', () => {
+    const s1 = extractSignals(
+      mkQuestion(),
+      mkBundle({ answer: 'Valid [11111111-1111-1111-1111-111111111111, 22222222-2222-2222-2222-222222222222] marker' }),
+    );
+    expect(s1.hasCitations).toBe(true);
+
+    const s2 = extractSignals(
+      mkQuestion(),
+      mkBundle({ answer: 'Valid [chunk_id=11111111-1111-1111-1111-111111111111, chunk_id=22222222-2222-2222-222222222222] marker' }),
+    );
+    expect(s2.hasCitations).toBe(true);
+
+    const s3 = extractSignals(
+      mkQuestion(),
+      mkBundle({ answer: 'Valid [chunk_id=11111111-1111-1111-1111-111111111111, 22222222-2222-2222-2222-222222222222] marker' }),
+    );
+    expect(s3.hasCitations).toBe(true);
+  });
+
   it('flags must_include that is absent (case-insensitive)', () => {
     const q = mkQuestion({ mustInclude: ['AttestationPolicy'] });
     const s = extractSignals(q, mkBundle({ answer: 'a generic answer with no policy names' }));
