@@ -46,6 +46,7 @@ export async function gradeOne(
         retrievedChunkCount: 0,
         mustIncludeMissing: question.mustInclude,
         mustNotIncludePresent: [],
+        expectedToolsMissing: [],
         hasCitations: false,
       },
       verdict: errorVerdict(msg),
@@ -76,6 +77,7 @@ function emptySignals(): Signals {
     retrievedChunkCount: 0,
     mustIncludeMissing: [],
     mustNotIncludePresent: [],
+    expectedToolsMissing: [],
     hasCitations: false,
   };
 }
@@ -104,6 +106,7 @@ export async function gradeOrchestration(
       verdict,
       orchestrationSignals,
       orchestrationVerdict: verdict,
+      orchestration: trace,
       promptTokens: bundle.promptTokens,
       completionTokens: bundle.completionTokens,
       totalTokens: bundle.totalTokens,
@@ -117,6 +120,7 @@ export async function gradeOrchestration(
       answer: bundle.answer,
       signals: emptySignals(),
       verdict: errorVerdict(msg),
+      orchestration: trace,
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,

@@ -93,4 +93,50 @@ describe('orchestrationTraceFromMessages', () => {
     ];
     expect(orchestrationTraceFromMessages(errored).isError).toBe(true);
   });
+
+  it('multi-turn runs: sums num_turns and keeps is_error sticky across results', () => {
+    const multiTurn: StreamMessage[] = [
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'draft' }] } },
+      { type: 'result', result: 'draft', usage: {}, num_turns: 3, is_error: true },
+      { type: 'user', message: { role: 'user', content: 'enforcement nudge' } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'final' }] } },
+      { type: 'result', result: 'final', usage: {}, num_turns: 2, is_error: false },
+    ];
+    const trace = orchestrationTraceFromMessages(multiTurn);
+    expect(trace.numTurns).toBe(5);
+    expect(trace.isError).toBe(true);
+  });
+});
+
+describe('orchestrationTraceFromMessages — delegation batches', () => {
+  const task = (id: string, subagent_type: string) => ({
+    type: 'tool_use' as const,
+    id,
+    name: 'Task',
+    input: { subagent_type, prompt: 'q' },
+  });
+
+  it('two Task blocks in one assistant message share a batch; separate messages do not', () => {
+    const parallel: StreamMessage[] = [
+      { type: 'assistant', message: { role: 'assistant', content: [task('d1', 'oim-ts-directory-messaging'), task('d2', 'oim-field-qa')] } },
+    ];
+    const sequential: StreamMessage[] = [
+      { type: 'assistant', message: { role: 'assistant', content: [task('d1', 'oim-ts-directory-messaging')] } },
+      { type: 'assistant', message: { role: 'assistant', content: [task('d2', 'oim-field-qa')] } },
+    ];
+    expect(orchestrationTraceFromMessages(parallel).delegations.map((d) => d.batch)).toEqual([0, 0]);
+    expect(orchestrationTraceFromMessages(sequential).delegations.map((d) => d.batch)).toEqual([0, 1]);
+  });
+
+  it('a sub-agent’s own turns do not advance the batch of a later orchestrator fan-out', () => {
+    // Without the !isSubAgent guard the specialist's two turns would push d2/d3 into different
+    // batches and a genuine parallel fan-out would read as sequential.
+    const msgs: StreamMessage[] = [
+      { type: 'assistant', message: { role: 'assistant', content: [task('d1', 'oim-field-qa')] } },
+      { type: 'assistant', parent_tool_use_id: 'd1', message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] } },
+      { type: 'assistant', parent_tool_use_id: 'd1', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } },
+      { type: 'assistant', message: { role: 'assistant', content: [task('d2', 'oim-access-governance'), task('d3', 'oim-db-history')] } },
+    ];
+    expect(orchestrationTraceFromMessages(msgs).delegations.map((d) => d.batch)).toEqual([0, 1, 1]);
+  });
 });

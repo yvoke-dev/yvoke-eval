@@ -22,7 +22,7 @@ function mkResult(id: string, verdict: string, mustNotPresent: string[] = []): E
     answer: 'a',
     signals: {
       toolsFired: [], searchCollections: [], retrievedCollections: [], retrievedChunkCount: 0,
-      mustIncludeMissing: [], mustNotIncludePresent: mustNotPresent, hasCitations: true,
+      mustIncludeMissing: [], mustNotIncludePresent: mustNotPresent, expectedToolsMissing: [], hasCitations: true,
     },
     verdict: { verdict, dimensions: {}, reasoning: '', evidence: [] },
     promptTokens: 0, completionTokens: 0, totalTokens: 0, latencyMs: 0, error: null,

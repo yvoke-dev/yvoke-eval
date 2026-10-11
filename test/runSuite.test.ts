@@ -29,6 +29,7 @@ function cfg(overrides: Partial<RunConfig> = {}): RunConfig {
     evalIntent: 'specialist',
     categories: ['basics'],
     expect: null,
+    webAllowedDomains: [],
     limit: 1,
     merge: false,
     answerModel: 'sonnet',
@@ -122,8 +123,10 @@ describe('runSuite — base system prompt wiring', () => {
       // implementation can satisfy the assertion.
       expect(h.urls).toEqual(['http://localhost:8080/api/chat/v1/prompts/system/default-chat']);
       expect(h.askedOverMcp).not.toContain(SYSTEM_PROMPT_NAME);
-      // The fetched text has to reach the model, not merely be fetched.
-      expect(h.tasks[0]!.systemPrompt).toBe('GROUNDING RULES');
+      // The fetched text reaches the model, combined with the playbook template text.
+      expect(h.tasks[0]!.systemPrompt).toBe('GROUNDING RULES\n\n---\n\nPLAYBOOK TEXT');
+      expect(h.tasks[0]!.modelContent).toBe(h.tasks[0]!.question.question);
+      expect(h.tasks[0]!.modelContent).not.toContain('PLAYBOOK TEXT');
       expect(summary.pass).toBe(1);
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
@@ -146,9 +149,24 @@ describe('runSuite — base system prompt wiring', () => {
     const h = harness({ systemPrompt: '' });
     const summary = await runSuite(cfg(), () => {}, h.deps);
     try {
-      expect(h.tasks[0]!.systemPrompt).toBeNull();
+      // With a playbook and no server base prompt, systemPrompt contains only the playbook text.
+      expect(h.tasks[0]!.systemPrompt).toBe('PLAYBOOK TEXT');
       const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
       expect(meta.systemPromptName).toBeNull();
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+
+  it('runs on SDK default (null systemPrompt) when both server prompt and playbook template are empty', async () => {
+    const h = harness({ systemPrompt: '' });
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      getText: async () => '',
+    };
+    const summary = await runSuite(cfg(), () => {}, h.deps);
+    try {
+      expect(h.tasks[0]!.systemPrompt).toBeNull();
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
     }
@@ -160,5 +178,63 @@ describe('runSuite — base system prompt wiring', () => {
     // to the baseline, so it must not silently produce gradeable results.
     await expect(runSuite(cfg(), () => {}, h.deps)).rejects.toThrow(UserError);
     expect(h.tasks).toHaveLength(0);
+  });
+});
+
+describe('runSuite — playbook-designated system prompt resolution', () => {
+  it('resolves designated system prompt over REST and combines with playbook', async () => {
+    const h = harness();
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'demo-basics', title: 'Basics', description: '', tools: ['search_corpus'], systemPrompt: 'coding-chat' },
+      ],
+    };
+    const promptsReturned: Record<string, string> = {
+      'default-chat': 'DEFAULT RULES',
+      'coding-chat': 'CODING RULES',
+    };
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      h.urls.push(urlStr);
+      const name = decodeURIComponent(urlStr.split('/').pop() ?? '');
+      return new Response(JSON.stringify({ systemPrompt: promptsReturned[name] ?? '' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const summary = await runSuite(cfg(), () => {}, h.deps);
+    try {
+      expect(h.urls).toContain('http://localhost:8080/api/chat/v1/prompts/system/default-chat');
+      expect(h.urls).toContain('http://localhost:8080/api/chat/v1/prompts/system/coding-chat');
+      expect(h.tasks[0]!.systemPrompt).toBe('CODING RULES\n\n---\n\nPLAYBOOK TEXT');
+      expect(h.tasks[0]!.modelContent).toBe(h.tasks[0]!.question.question);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+
+  it('falls back to default-chat when designated prompt resolution fails', async () => {
+    const h = harness();
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'demo-basics', title: 'Basics', description: '', tools: ['search_corpus'], systemPrompt: 'failing-chat' },
+      ],
+    };
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      h.urls.push(urlStr);
+      if (urlStr.includes('failing-chat')) {
+        return new Response('Not found', { status: 404 });
+      }
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT RULES' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const summary = await runSuite(cfg(), () => {}, h.deps);
+    try {
+      expect(h.tasks[0]!.systemPrompt).toBe('DEFAULT RULES\n\n---\n\nPLAYBOOK TEXT');
+      expect(summary.pass).toBe(1);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
   });
 });

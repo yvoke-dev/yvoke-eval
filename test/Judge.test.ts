@@ -13,6 +13,7 @@ const SIGNALS: Signals = {
   retrievedChunkCount: 3,
   mustIncludeMissing: [],
   mustNotIncludePresent: [],
+  expectedToolsMissing: [],
   hasCitations: true,
 };
 

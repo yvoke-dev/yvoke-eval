@@ -15,6 +15,7 @@ export interface OrchestrationJudgeRequest {
 /** The orchestration LLM-as-judge (Mode 3). Reuses the same StructuredModel transport as ClaudeJudge. */
 export interface OrchestrationJudge {
   review(req: OrchestrationJudgeRequest): Promise<Verdict>;
+  readonly resolvedModel?: string;
 }
 
 export interface OrchestrationJudgeOptions {
@@ -30,6 +31,10 @@ export class ClaudeOrchestrationJudge implements OrchestrationJudge {
     private readonly model: StructuredModel,
     private readonly opts: OrchestrationJudgeOptions,
   ) {}
+
+  get resolvedModel(): string | undefined {
+    return this.model.resolvedModel;
+  }
 
   async review(req: OrchestrationJudgeRequest): Promise<Verdict> {
     const user = `${buildOrchestrationUserMessage(req.question, req.answer, req.orchestrationSignals, req.trace)}\n\n---\n${ORCH_VERDICT_CONTRACT}`;

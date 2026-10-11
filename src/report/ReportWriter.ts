@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import type { EvalResult } from '../types';
@@ -54,8 +54,67 @@ export class ReportWriter {
     for (const [cat, list] of sortedEntries(byCategory)) {
       writeFileSync(join(runDir, `eval_${cat}.md`), renderCategoryReport(cat, list));
     }
+    this.appendOverview(evalDir, fullMeta, results, id);
     return { runDir, runId: id };
   }
+
+  private appendOverview(evalDir: string, meta: Record<string, unknown>, results: EvalResult[], runId: string): void {
+    const runsDir = join(evalDir, 'runs');
+    if (!existsSync(runsDir)) {
+      mkdirSync(runsDir, { recursive: true });
+    }
+    const overviewPath = join(runsDir, 'OVERVIEW.md');
+    const exists = existsSync(overviewPath);
+
+    const mode = String(meta['evalIntent'] ?? meta['answerProvider'] ?? 'single');
+    const answerModel = formatModelDisplay(String(meta['answerModel'] ?? 'model'), meta['resolvedAnswerModel']);
+    const reviewerModel = formatModelDisplay(String(meta['reviewerModel'] ?? 'reviewer'), meta['resolvedReviewerModel']);
+    const masReviewer = meta['masReviewerModel']
+      ? formatModelDisplay(String(meta['masReviewerModel']), meta['resolvedMasReviewerModel'])
+      : '—';
+    const thinkingLevel = meta['thinkingLevel'] ? String(meta['thinkingLevel']) : 'off';
+
+    let passCount = 0;
+    let critPass = 0;
+    let critTotal = 0;
+    let totalLatencyMs = 0;
+    const cats = new Set<string>();
+
+    for (const r of results) {
+      if (r.verdict.verdict === 'PASS') passCount++;
+      if (r.question.critical) {
+        critTotal++;
+        if (r.verdict.verdict === 'PASS') critPass++;
+      }
+      cats.add(r.question.category);
+      totalLatencyMs += r.latencyMs ?? 0;
+    }
+
+    const catStr = [...cats].join(', ');
+    const passRate = `${passCount}/${results.length} (${Math.round((passCount / (results.length || 1)) * 100)}%)`;
+    const critRate = critTotal > 0 ? `${critPass}/${critTotal}` : 'N/A';
+    const latStr = `${(totalLatencyMs / 1000).toFixed(1)}s`;
+
+    let content = '';
+    if (!exists) {
+      content += '# Evaluation Benchmark Overview\n\n';
+      content += 'Cumulative record of evaluation runs across single-agent and multi-agent suites.\n\n';
+      content += '| Date (UTC) | Run ID | Mode | Category / Scope | Worker Model | Thinking | Judge Model | MAS Reviewer | Pass Rate | Critical Pass | Latency |\n';
+      content += '|---|---|---|---|---|---|---|---|---|---|---|\n';
+    }
+
+    content += `| ${meta['timestamp']} | \`${runId}\` | ${mode} | ${catStr} (${results.length} Qs) | ${answerModel} | ${thinkingLevel} | ${reviewerModel} | ${masReviewer} | ${passRate} | ${critRate} | ${latStr} |\n`;
+
+    appendFileSync(overviewPath, content, 'utf8');
+  }
+}
+
+/** Format a configured model alias with its concrete resolved version, e.g. `sonnet (claude-sonnet-5)`. */
+export function formatModelDisplay(model: string, resolved?: unknown): string {
+  if (!model || model === '—') return '—';
+  const res = typeof resolved === 'string' && resolved.trim().length > 0 ? resolved.trim() : undefined;
+  if (!res || res === model) return model;
+  return `${model} (${res})`;
 }
 
 /** Build one run id for a whole run. Call ONCE per `runSuite`, then pass it to every `write`. */
@@ -76,24 +135,53 @@ export function toJson(value: unknown): string {
 export function renderSummary(meta: Record<string, unknown>, results: EvalResult[]): string {
   const byCat = new Map<string, [number, number, number, number]>(); // [pass, partial, fail, error]
   const tot: [number, number, number, number] = [0, 0, 0, 0];
+  let totalLatencyMs = 0;
+
   for (const r of results) {
     const c = byCat.get(r.question.category) ?? [0, 0, 0, 0];
     const idx = verdictIndex(r.verdict.verdict);
     c[idx]++;
     tot[idx]++;
     byCat.set(r.question.category, c);
+    totalLatencyMs += r.latencyMs ?? 0;
   }
+
+  const mode = String(meta['evalIntent'] ?? meta['answerProvider'] ?? 'single');
+  const answerModel = formatModelDisplay(String(meta['answerModel'] ?? 'model'), meta['resolvedAnswerModel']);
+  const reviewerModel = formatModelDisplay(String(meta['reviewerModel'] ?? 'reviewer'), meta['resolvedReviewerModel']);
+  const masReviewer = meta['masReviewerModel']
+    ? formatModelDisplay(String(meta['masReviewerModel']), meta['resolvedMasReviewerModel'])
+    : '—';
+  const thinkingLevel = meta['thinkingLevel'] ? String(meta['thinkingLevel']) : 'off';
 
   let sb = '# Eval run summary\n\n';
   sb += `- timestamp: ${meta['timestamp']}  UTC\n`;
-  sb += `- answer model: \`${meta['answerModel']}\`\n`;
-  sb += `- reviewer model: \`${meta['reviewerModel']}\`\n`;
-  sb += `- git: \`${meta['gitSha']}\`\n\n`;
+  sb += `- mode: \`${mode}\`\n`;
+  sb += `- answer model: \`${answerModel}\` (thinking: \`${thinkingLevel}\`)\n`;
+  sb += `- reviewer model: \`${reviewerModel}\`\n`;
+  if (masReviewer !== '—') {
+    sb += `- mas reviewer: \`${masReviewer}\`\n`;
+  }
+  sb += `- git: \`${meta['gitSha']}\`\n`;
+  sb += `- total duration: \`${(totalLatencyMs / 1000).toFixed(1)}s\`\n\n`;
   sb += `**Overall: ${tot[0]} PASS / ${tot[1]} PARTIAL / ${tot[2]} FAIL / ${tot[3]} ERROR** (of ${results.length})\n\n`;
   sb += '| Category | PASS | PARTIAL | FAIL | ERROR |\n|---|---|---|---|---|\n';
   for (const [cat, c] of sortedEntries(byCat)) {
     sb += `| ${cat} | ${c[0]} | ${c[1]} | ${c[2]} | ${c[3]} |\n`;
   }
+  sb += '\n';
+
+  sb += '### Detailed Results\n\n';
+  sb += '| Category | # | Question | Mode | Worker | Judge | MAS Rev | Verdict | Latency | Tokens | Critical |\n';
+  sb += '|---|---|---|---|---|---|---|---|---|---|---|\n';
+  for (const r of results) {
+    const lat = r.latencyMs != null ? `${(r.latencyMs / 1000).toFixed(1)}s` : '—';
+    const tok = r.totalTokens != null && r.totalTokens > 0 ? r.totalTokens.toLocaleString() : '—';
+    const crit = r.question.critical ? 'YES' : 'NO';
+    sb += `| ${r.question.category} | ${r.question.id} | ${escape(r.question.question)} | ${mode} | ${answerModel} | ${reviewerModel} | ${masReviewer} | ${r.verdict.verdict} | ${lat} | ${tok} | ${crit} |\n`;
+  }
+  sb += '\n';
+
   return sb;
 }
 

@@ -23,6 +23,13 @@ export interface DelegationInvocation {
   prompt?: string;
   /** Stream-arrival index among all delegations (0-based). Approximates round ordering. */
   order: number;
+  /**
+   * Index of the assistant message this delegation arrived in (0-based, counting assistant messages).
+   * Delegations sharing a batch were issued as parallel tool_use blocks of ONE assistant message —
+   * this is the only evidence in the stream that separates a fan-out from a sequence, and the runners
+   * all set `includePartialMessages: false`, so an assistant message is never split across arrivals.
+   */
+  batch: number;
   /** Always undefined in the single-tier topology (see file note); future-proofing only. */
   parentId?: string;
   /** subagentType === REVIEWER_SUBAGENT. */
@@ -46,4 +53,12 @@ export interface OrchestrationTrace {
   numTurns?: number;
   /** is_error from the result message — the run errored rather than finishing cleanly. */
   isError?: boolean;
+  /**
+   * The harness had to nudge the orchestrator into reviewing (it ended a turn with specialist
+   * delegations and no reviewer call). Mirrors the client's one-shot `enforce` action.
+   *
+   * Set by the runner, not derived from the stream, and it changes how `reviewRounds` should be
+   * read: 1 review with this flag set means the orchestrator did NOT review on its own initiative.
+   */
+  reviewEnforced?: boolean;
 }

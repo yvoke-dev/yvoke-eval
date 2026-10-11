@@ -20,8 +20,8 @@ export interface ToolEvidence {
 }
 
 /**
- * The input handed to an AnswerProvider. The prod-faithful playbook-template prepend lives in
- * `modelContent` (built centrally) so every provider feeds the SUT identical input.
+ * The input handed to an AnswerProvider. The playbook template text is combined into `systemPrompt`,
+ * and `modelContent` carries only the user question (clean without playbook text).
  */
 export interface EvalTask {
   question: EvalQuestion;

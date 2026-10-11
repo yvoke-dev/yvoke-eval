@@ -108,6 +108,56 @@ plain shell exports, read either by the `${VAR:default}` interpolation in the co
 
 `$YVOKE_EVAL_CONFIG` also selects the content repo for one shell; see below.
 
+### Model Selection & Version Resolution
+
+Models are configured via `answer.model` (or CLI `--answer-model`), `reviewer.model` (or CLI `--reviewer-model`), and MAS role tunings.
+
+| Target Model | Full Model ID | Shorthand / Alias Handling |
+|---|---|---|
+| **Claude Haiku 5.5** | `claude-haiku-5-5` | Pass `claude-haiku-5-5`, `haiku-5.5`, `haiku 5.5`, or bare `haiku` (canonicalizes to `claude-haiku-5-5`). |
+| **Claude Sonnet 5.5** | `claude-sonnet-5-5` | Pass `claude-sonnet-5-5`, `sonnet-5.5`, `sonnet 5.5`, or bare `sonnet` (canonicalizes to `claude-sonnet-5-5`). |
+| **Claude Opus 5.5** | `claude-opus-5-5` | Pass `claude-opus-5-5`, `opus-5.5`, `opus 5.5`, or bare `opus` (canonicalizes to `claude-opus-5-5`). |
+
+The harness automatically extracts the concrete runtime model ID returned in the Anthropic Agent SDK's `system.init` message (`msg.model`) and records both the alias and resolved version in `run_meta.json`, `summary.md`, and `eval/runs/OVERVIEW.md`.
+
+### Web Access Configuration (`web.allowedDomains`)
+
+When evaluating playbooks that declare `WebSearch` or `WebFetch`, allowed domains are configured in `yvoke-eval.yaml`:
+
+```yaml
+web:
+  allowedDomains:
+    - docs.oneidentity.com
+    - support.oneidentity.com
+```
+
+If `web.allowedDomains` is omitted or empty, web tool calls fail closed in `canUseTool`, ensuring eval runs only contact approved endpoints matching production policy.
+
+### Caveat — a replayed answer can be scored as if the model had run
+
+Yvoke reaches Gemini through a Cloudflare AI Gateway, and **caching is on at the gateway** — enabled
+in the dashboard, not in code. It caches streaming responses too. The cache key is
+`SHA-256(provider + endpoint + model + auth header + full request body)`, so organic chat rarely
+repeats — but **this harness replays a fixed question set, so it sends byte-identical first turns by
+design.** That is exactly the shape the cache is built for.
+
+When it hits, the gateway returns the stored answer and **the model never executes**. The run then
+scores a replayed answer, and its cost reads near-zero for work that would really have been billed.
+Nothing prevents this today: `yvoke-web` records the outcome faithfully
+(`llm_call_logs.gateway_cache_status`, `cost_avoided`, `gateway_log_id`) but **never sends
+`cf-aig-skip-cache`**, and this harness has no way to ask for it.
+
+Two practical consequences:
+
+- **Before trusting a comparison**, check what share of that run's calls were replayed.
+  `gateway_cache_status` is on every `llm_call_logs` row and eval traffic is identifiable by
+  `source`. A run with a material HIT share is measuring the cache, not the model.
+- **Re-running the same suite is the worst case, not the safest.** The second run is the one likely
+  to be served from cache, so a score that looks stable across repeated runs is weak evidence.
+
+If this proves to bite, the fix is two-sided: the harness identifies its traffic, and `yvoke-web`
+forwards `cf-aig-skip-cache: true` for it. Neither half exists yet.
+
 ### Shell wrappers
 
 `./eval.sh` and `./eval-all.sh` supply `--config` for you. Name your content repo once:

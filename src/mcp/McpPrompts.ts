@@ -14,6 +14,7 @@ export interface McpPromptInfo {
   description: string;
   tools?: string[];
   codeExecution?: boolean;
+  systemPrompt?: string;
 }
 
 export interface McpPromptsOptions {
@@ -34,6 +35,37 @@ export interface PromptSource {
 }
 
 const REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * Parses raw MCP prompt payload into McpPromptInfo.
+ * Standalone and generic so metadata extraction is unit-testable without a live server.
+ */
+export function parsePromptInfo(p: unknown): McpPromptInfo {
+  const raw = p as {
+    name: string;
+    title?: string;
+    description?: string;
+    meta?: Record<string, unknown>;
+    _meta?: Record<string, unknown>;
+  };
+  const meta = raw.meta ?? raw._meta;
+  const rawPrompt =
+    raw._meta?.systemPrompt ??
+    raw._meta?.system_prompt ??
+    raw.meta?.systemPrompt ??
+    raw.meta?.system_prompt;
+  const systemPrompt =
+    typeof rawPrompt === 'string' && rawPrompt.trim().length > 0 ? rawPrompt.trim() : undefined;
+
+  return {
+    name: raw.name,
+    title: raw.title ?? raw.name,
+    description: raw.description ?? '',
+    tools: Array.isArray(meta?.tools) ? (meta!.tools as unknown[]).map(String) : undefined,
+    codeExecution: typeof meta?.codeExecution === 'boolean' ? (meta.codeExecution as boolean) : undefined,
+    systemPrompt,
+  };
+}
 
 /**
  * Run an operation on a cached connection, dropping it and reconnecting once if it fails.
@@ -67,17 +99,7 @@ export class McpPrompts implements PromptSource {
 
   async list(): Promise<McpPromptInfo[]> {
     const res = await this.run((client) => client.listPrompts(undefined, { timeout: REQUEST_TIMEOUT_MS }));
-    return res.prompts.map((p) => {
-      const meta = (p as { meta?: Record<string, unknown>; _meta?: Record<string, unknown> }).meta ??
-        (p as { _meta?: Record<string, unknown> })._meta;
-      return {
-        name: p.name,
-        title: (p as { title?: string }).title ?? p.name,
-        description: p.description ?? '',
-        tools: Array.isArray(meta?.tools) ? (meta!.tools as unknown[]).map(String) : undefined,
-        codeExecution: typeof meta?.codeExecution === 'boolean' ? (meta.codeExecution as boolean) : undefined,
-      };
-    });
+    return res.prompts.map(parsePromptInfo);
   }
 
   /** The prompt's messages concatenated into a single playbook string. */

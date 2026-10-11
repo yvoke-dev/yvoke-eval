@@ -39,6 +39,9 @@ export function orchestrationTraceFromMessages(messages: StreamMessage[]): Orche
   let clarifyRequested = false;
   let numTurns: number | undefined;
   let isError = false;
+  // Counts MAIN-THREAD assistant messages only, so a sub-agent's own turns never advance the batch of
+  // a later orchestrator fan-out.
+  let assistantBatch = -1;
 
   for (const msg of messages) {
     const isSubAgent = msg.parent_tool_use_id != null;
@@ -46,6 +49,7 @@ export function orchestrationTraceFromMessages(messages: StreamMessage[]): Orche
     const content = Array.isArray(msg.message?.content) ? (msg.message!.content as Block[]) : [];
 
     if (msg.type === 'assistant') {
+      if (!isSubAgent) assistantBatch += 1;
       for (const b of content) {
         if (b.type === 'tool_use') {
           const name = String(b.name);
@@ -57,6 +61,7 @@ export function orchestrationTraceFromMessages(messages: StreamMessage[]): Orche
               subagentType,
               prompt: typeof input.prompt === 'string' ? input.prompt : undefined,
               order: delegations.length,
+              batch: assistantBatch,
               parentId: undefined, // single-tier topology: delegations are main-thread only
               isReviewer: subagentType === REVIEWER_SUBAGENT,
             };
@@ -84,8 +89,10 @@ export function orchestrationTraceFromMessages(messages: StreamMessage[]): Orche
         attribution.set(id, a);
       }
     } else if (msg.type === 'result') {
-      numTurns = msg.num_turns;
-      isError = msg.is_error === true;
+      if (typeof msg.num_turns === 'number') {
+        numTurns = (numTurns ?? 0) + msg.num_turns;
+      }
+      if (msg.is_error === true) isError = true;
     }
   }
 

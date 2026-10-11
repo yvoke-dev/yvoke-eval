@@ -23,8 +23,8 @@ describe('buildOrchestrationUserMessage', () => {
     expect(msg).toContain('## Orchestration trace');
     expect(msg).toContain('terminated_abnormally: false');
     expect(msg).toContain('min_review_rounds_satisfiable: true');
-    expect(msg).toContain('0. oim-getting-started  isReviewer=false');
-    expect(msg).toContain('1. reviewer  isReviewer=true  verdict=APPROVED');
+    expect(msg).toContain('0. batch=0  oim-getting-started  isReviewer=false');
+    expect(msg).toContain('1. batch=1  reviewer  isReviewer=true  verdict=APPROVED');
   });
 
   it('marks routing UNAUTHORED for BOTH undefined and empty expected_specialists', () => {
@@ -53,4 +53,29 @@ describe('buildOrchestrationUserMessage', () => {
   it('labels the answer as context-only (do not re-grade grounding)', () => {
     expect(buildOrchestrationUserMessage(mkQuestion(), 'the answer', mkOrchestrationSignals(), mkTrace())).toContain('do NOT re-grade grounding/citations');
   });
+});
+
+it('renders the observed delegation shape beside the authored expectation', () => {
+  // The grader cannot infer concurrency from prose, so both must be on the page or the assertion is
+  // decorative: `expected_delegation` used to be printed with no observed value to compare it to.
+  const msg = buildOrchestrationUserMessage(
+    mkQuestion({ expectedDelegation: 'parallel' }),
+    'answer',
+    mkOrchestrationSignals({
+      delegationPattern: 'sequential',
+      maxDelegationBatchWidth: 1,
+      expectedDelegationSatisfied: false,
+    }),
+    mkTrace(),
+  );
+  expect(msg).toContain('expected_delegation: parallel');
+  expect(msg).toContain('delegation_pattern: sequential');
+  expect(msg).toContain('max_delegation_batch_width: 1');
+  expect(msg).toContain('expected_delegation_satisfied: false');
+});
+
+it('says NA when no shape was authored, so the grader judges membership only', () => {
+  const msg = buildOrchestrationUserMessage(mkQuestion(), 'answer', mkOrchestrationSignals(), mkTrace());
+  expect(msg).toContain('expected_delegation_satisfied: NA (unset)');
+  expect(msg).not.toContain('expected_delegation:');
 });

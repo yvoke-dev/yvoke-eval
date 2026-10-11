@@ -120,8 +120,53 @@ describe('buildCanUseTool', () => {
   it('denies delegation unless it is part of the design', async () => {
     expect(await behaviorOf('Task')).toBe('deny');
     expect(await behaviorOf('Agent')).toBe('deny');
-    expect(await behaviorOf('Task', { allowDelegation: true })).toBe('allow');
-    expect(await behaviorOf('Agent', { allowDelegation: true })).toBe('allow');
+    // A roster is now part of "the design": allowDelegation alone used to wave through ANY
+    // subagent_type, which is how Q1 of the 3 Sep run delegated to the built-in `claude`.
+    const mas = { allowDelegation: true, delegationRoster: ['oim-field-qa', 'reviewer'] };
+    expect(await behaviorOf('Task', mas, { subagent_type: 'oim-field-qa' })).toBe('allow');
+    expect(await behaviorOf('Agent', mas, { subagent_type: 'reviewer' })).toBe('allow');
+  });
+
+  /**
+   * Off-roster delegation. `Options.agents` ADDS custom subagents to the SDK's own and nothing
+   * suppresses the built-ins, so the orchestrator is offered `claude`, `general-purpose`, `Explore`
+   * and friends beside the real specialists. On 3 Sep 2026 it used them: `noop` was rejected by the
+   * SDK (unknown name), but **`claude` ran** — a legitimate built-in with no playbook, no corpus and
+   * no citation discipline, whose output went into an answer presented as grounded.
+   */
+  describe('delegation targets', () => {
+    const mas = {
+      allowDelegation: true,
+      delegationRoster: ['oim-field-qa', 'oim-access-governance', 'reviewer'],
+    };
+
+    it('denies a built-in the SDK would happily run', async () => {
+      // The case nothing else catches: the SDK accepts `claude`, so this gate is the only difference
+      // between a grounded specialist answer and a general-purpose one.
+      for (const target of ['claude', 'general-purpose', 'Explore', 'Plan', 'statusline-setup']) {
+        expect(await behaviorOf('Task', mas, { subagent_type: target }), target).toBe('deny');
+      }
+    });
+
+    it('names the real specialists in the denial so the orchestrator can retry', async () => {
+      const r = await policy(mas).canUse('Task', { subagent_type: 'claude' } as never, ctx);
+      expect(r?.behavior).toBe('deny');
+      const message = r?.behavior === 'deny' ? r.message : '';
+      expect(message).toContain('oim-field-qa');
+      expect(message).toContain('oim-access-governance');
+    });
+
+    it('denies a missing or empty subagent_type rather than defaulting', async () => {
+      expect(await behaviorOf('Task', mas, {})).toBe('deny');
+      expect(await behaviorOf('Task', mas, { subagent_type: '' })).toBe('deny');
+    });
+
+    it('fails CLOSED when delegation is enabled with no roster supplied', async () => {
+      // A missing roster is a configuration error, and the fail-open version of it is invisible:
+      // every delegation would be allowed while the code claims to restrict them.
+      expect(await behaviorOf('Task', { allowDelegation: true }, { subagent_type: 'oim-field-qa' })).toBe('deny');
+      expect(await behaviorOf('Task', { allowDelegation: true, delegationRoster: [] }, { subagent_type: 'oim-field-qa' })).toBe('deny');
+    });
   });
 
   it('captures a clarifying question and denies the tool, so the run stops instead of hanging', async () => {
