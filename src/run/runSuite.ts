@@ -107,7 +107,8 @@ export async function runSuite(
 
   // The production base system prompt, so answers are produced under the same grounding and citation
   // rules as yvoke-desktop. A failure here is fatal by design — see SystemPromptClient.get.
-  const systemPrompt = await new SystemPromptClient({ ...cfg.mcp, fetchFn: deps.fetchFn }).get(SYSTEM_PROMPT_NAME);
+  const systemPromptClient = new SystemPromptClient({ ...cfg.mcp, fetchFn: deps.fetchFn });
+  const systemPrompt = await systemPromptClient.get(SYSTEM_PROMPT_NAME);
   log(
     systemPrompt
       ? `Loaded ${SYSTEM_PROMPT_NAME} system prompt from the server (${systemPrompt.length} chars).`
@@ -142,6 +143,7 @@ export async function runSuite(
         answerModel: cfg.answerModel,
         thinkingLevel: cfg.thinkingLevel,
         systemPrompt,
+        systemPromptClient,
       });
       return runner.run(task);
     };

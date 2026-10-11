@@ -32,6 +32,7 @@ export const SYSTEM_PROMPT_NAME = 'default-chat';
 
 export class SystemPromptClient {
   private readonly fetchFn: typeof fetch;
+  private readonly cache = new Map<string, string | null>();
 
   constructor(private readonly opts: SystemPromptClientOptions) {
     this.fetchFn = opts.fetchFn ?? fetch;
@@ -47,6 +48,10 @@ export class SystemPromptClient {
    * to production nor to the baseline.
    */
   async get(name: string): Promise<string | null> {
+    if (this.cache.has(name)) {
+      return this.cache.get(name)!;
+    }
+
     const url = `${this.opts.serverBaseUrl.replace(/\/+$/, '')}${API_PREFIX}/prompts/system/${encodeURIComponent(name)}`;
 
     let res: Response;
@@ -79,6 +84,8 @@ export class SystemPromptClient {
       throw new UserError(`System-prompt endpoint ${url} returned no "systemPrompt" string.`);
     }
 
-    return prompt.trim() ? prompt : null;
+    const result = prompt.trim() ? prompt : null;
+    this.cache.set(name, result);
+    return result;
   }
 }

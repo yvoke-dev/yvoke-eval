@@ -190,7 +190,7 @@ yvoke-eval/
     mcp/McpPrompts.ts                       # ported from desktop
     agent/
       AgentRun.ts                           # query() wiring for single + mas
-      buildTask.ts                          # EvalTask (playbook prepend lives here)
+      buildTask.ts                          # EvalTask (system prompt + playbook assembly lives here)
       capture.ts                            # AnswerBundle from the SDK stream
       vendor/                               # synced from yvoke-desktop (provenance header + sync script)
         translate.ts policy.ts orchestration.ts McpConnection.ts thinking.ts ClaudeAuth.ts types.ts

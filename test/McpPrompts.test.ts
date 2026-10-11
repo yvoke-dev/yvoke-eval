@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { retryOnce } from '../src/mcp/McpPrompts';
+import { retryOnce, parsePromptInfo } from '../src/mcp/McpPrompts';
 
 /**
  * The server expires idle MCP sessions, and a run leaves this connection idle for the 40-60s the
@@ -49,5 +49,53 @@ describe('retryOnce', () => {
     await expect(retryOnce(h.op, h.connect, h.reset)).rejects.toThrow('Session not found');
     expect(h.events.filter((e) => e.startsWith('op('))).toHaveLength(2);
     expect(h.events.filter((e) => e === 'reset')).toHaveLength(1);
+  });
+});
+
+describe('parsePromptInfo — metadata parsing', () => {
+  it('parses systemPrompt from _meta.systemPrompt', () => {
+    const info = parsePromptInfo({
+      name: 'playbook-1',
+      title: 'Playbook 1',
+      description: 'Desc',
+      _meta: { systemPrompt: 'coding-chat' },
+    });
+    expect(info.systemPrompt).toBe('coding-chat');
+  });
+
+  it('parses systemPrompt from _meta.system_prompt', () => {
+    const info = parsePromptInfo({
+      name: 'playbook-2',
+      _meta: { system_prompt: 'coding-chat' },
+    });
+    expect(info.systemPrompt).toBe('coding-chat');
+  });
+
+  it('parses systemPrompt from meta.systemPrompt and meta.system_prompt', () => {
+    const info1 = parsePromptInfo({
+      name: 'playbook-3',
+      meta: { systemPrompt: 'my-chat' },
+    });
+    expect(info1.systemPrompt).toBe('my-chat');
+
+    const info2 = parsePromptInfo({
+      name: 'playbook-4',
+      meta: { system_prompt: 'my-chat-2' },
+    });
+    expect(info2.systemPrompt).toBe('my-chat-2');
+  });
+
+  it('trims whitespace and returns undefined if empty or whitespace-only', () => {
+    const info1 = parsePromptInfo({
+      name: 'playbook-5',
+      _meta: { systemPrompt: '  ' },
+    });
+    expect(info1.systemPrompt).toBeUndefined();
+
+    const info2 = parsePromptInfo({
+      name: 'playbook-6',
+      _meta: {},
+    });
+    expect(info2.systemPrompt).toBeUndefined();
   });
 });

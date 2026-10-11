@@ -31,6 +31,13 @@ describe('SystemPromptClient', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok');
   });
 
+  it('caches successful resolutions in memory to avoid repeated requests', async () => {
+    const { c, calls } = client(json({ systemPrompt: 'cached prompt' }));
+    await expect(c.get('cached-prompt')).resolves.toBe('cached prompt');
+    await expect(c.get('cached-prompt')).resolves.toBe('cached prompt');
+    expect(calls).toHaveLength(1);
+  });
+
   it('does not double up slashes on a base url with a trailing slash', async () => {
     const { c, calls } = client(json({ systemPrompt: 'x' }), 'http://localhost:8080/');
     await c.get('a-name');
