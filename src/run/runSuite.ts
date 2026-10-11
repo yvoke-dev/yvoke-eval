@@ -16,6 +16,7 @@ import { AgentSdkStructuredModel } from '../reviewer/AgentSdkStructuredModel';
 import { loadGrader } from '../reviewer/loadGrader';
 import { ReportWriter, newRunId } from '../report/ReportWriter';
 import { detectClaudeCredentials, type ClaudeCredentialStatus } from '../agent/auth';
+import { normalizeModelName } from '../cli';
 
 export interface RunConfig {
   evalDir: string;
@@ -122,7 +123,7 @@ export async function runSuite(
   let thinkingLabel: string;
   if (cfg.mode === 'mas') {
     if (!cfg.mas) throw new Error('mas mode requires a resolved profile (cfg.mas).');
-    const orch = await buildOrchestrator(cfg.mas.profile, cfg.mas.tuning, prompts, systemPrompt);
+    const orch = await buildOrchestrator(cfg.mas.profile, cfg.mas.tuning, prompts, systemPrompt, systemPromptClient);
     log(`Orchestrator ready: ${orch.specialistNames.length} specialists (${orch.specialistNames.join(', ')}).`);
     const masRunner = new MasAnswerRunner({ ...cfg.mcp, sandboxDir: cfg.sandboxDir, webAllowedDomains: cfg.webAllowedDomains }, orch);
     produce = (q) => masRunner.run(q.question);
@@ -199,6 +200,10 @@ export async function runSuite(
     graderPromptSha: grader.sha,
     gitSha: sutSha,
     masReviewerModel: cfg.mode === 'mas' ? (cfg.mas?.tuning.reviewer.model ?? null) : null,
+    resolvedMasReviewerModel:
+      cfg.mode === 'mas' && cfg.mas?.tuning.reviewer.model
+        ? normalizeModelName(cfg.mas.tuning.reviewer.model)
+        : null,
   };
 
   const writer = new ReportWriter();

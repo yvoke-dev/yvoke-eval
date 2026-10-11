@@ -112,8 +112,8 @@ describe('buildAutoApproveTools — web tools are granted but never pre-approved
         /allowedTools:\s*buildAutoApproveTools\(/,
       );
       // canUseTool is built from the unreduced grant — that is the list the playbook gate compares.
-      expect(src, `${file}: canUseTool must receive the full grant`).toMatch(
-        /buildCanUseTool\(\s*(?!buildAutoApproveTools)/,
+      expect(src, `${file}: canUseTool must receive the full grant`).not.toMatch(
+        /buildCanUseTool\(\s*buildAutoApproveTools/,
       );
     }
   });

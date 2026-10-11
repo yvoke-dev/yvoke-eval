@@ -6,10 +6,13 @@ import {
   mapSpecialistTools,
   ORCHESTRATOR_AGENT,
   REVIEWER_SUBAGENT,
+  EVIDENCE_HEADING,
+  REVIEW_ENFORCEMENT_PROMPT,
   type OrchestratorProfile,
   type OrchestratorTuning,
 } from '../src/agent/orchestration';
 import type { McpPrompts, McpPromptInfo } from '../src/mcp/McpPrompts';
+import type { SystemPromptClient } from '../src/server/SystemPromptClient';
 import { buildAllowedTools } from '../src/agent/policy';
 import { DEFAULT_KB_TOOLS } from '../src/agent/mcpServers';
 
@@ -51,9 +54,11 @@ describe('buildOrchestrator', () => {
     expect(r.orchestratorModel).toBe('opus');
 
     const orch = r.agents[ORCHESTRATOR_AGENT];
+    expect(orch.prompt).toContain('BASE'); // orchestrator layers base system prompt
     expect(orch.prompt).toContain('PROMPT(oim-orchestrator)');
     expect(orch.prompt).toContain('oim-getting-started'); // roster
     expect(orch.tools).toContain('Task');
+    expect(orch.tools).toContain(mcpTool('verify_citations'));
     expect(orch.model).toBe('opus');
 
     const specialist = r.agents['oim-getting-started'];
@@ -67,6 +72,8 @@ describe('buildOrchestrator', () => {
     // only tool". `get_section` used to be granted here as well, which graded a reviewer holding a
     // capability production withholds: it returns the whole section around a passage, so claims get
     // judged against neighbouring text no specialist retrieved.
+    expect(r.agents[REVIEWER_SUBAGENT].prompt).not.toContain('BASE'); // reviewer deliberately gets no base prompt
+    expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('PROMPT(oim-orchestrator-reviewer)');
     expect(r.agents[REVIEWER_SUBAGENT].tools).toEqual([mcpTool('verify_citations')]);
     expect(r.agents[REVIEWER_SUBAGENT].tools).not.toContain(mcpTool('get_section'));
   });
@@ -206,3 +213,43 @@ describe('REVIEWER_ADAPTER — cancels the playbook’s submit_review contract',
     expect(src).toMatch(/rejection with no feedback/i);
   });
 });
+
+describe('buildOrchestrator — designated system prompt resolution', () => {
+  it('layers designated system prompts for orchestrator, specialists, and reviewer', async () => {
+    const promptsWithMeta: McpPromptInfo[] = [
+      { name: 'oim-orchestrator', title: 'Orchestrator', description: 'desc', tools: [], codeExecution: false, systemPrompt: 'custom-orch' },
+      { name: 'oim-orchestrator-reviewer', title: 'Reviewer', description: 'desc', tools: [], codeExecution: false, systemPrompt: 'custom-rev' },
+      { name: 'oim-getting-started', title: 'Getting Started', description: 'desc', tools: ['search_corpus'], codeExecution: false, systemPrompt: 'custom-spec' },
+      { name: 'oim-developer-api', title: 'Dev API', description: 'desc', tools: ['search_graph_entities'], codeExecution: false },
+    ];
+    const source = {
+      list: async () => promptsWithMeta,
+      getText: async (name: string) => `PROMPT(${name})`,
+    } as unknown as McpPrompts;
+
+    const mockClient = {
+      get: async (name: string) => {
+        if (name === 'custom-orch') return 'ORCHESTRATOR CUSTOM PROMPT';
+        if (name === 'custom-rev') return 'REVIEWER CUSTOM PROMPT';
+        if (name === 'custom-spec') return 'SPECIALIST CUSTOM PROMPT';
+        return null;
+      },
+    } as unknown as SystemPromptClient;
+
+    const r = await buildOrchestrator(profile, tuning, source, 'DEFAULT_BASE', mockClient);
+    expect(r.agents[ORCHESTRATOR_AGENT].prompt).toContain('ORCHESTRATOR CUSTOM PROMPT');
+    expect(r.agents['oim-getting-started'].prompt).toContain('SPECIALIST CUSTOM PROMPT');
+    expect(r.agents['oim-developer-api'].prompt).toContain('DEFAULT_BASE');
+    expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('REVIEWER CUSTOM PROMPT');
+  });
+});
+
+describe('EVIDENCE_HEADING and contractual review prompts', () => {
+  it('injects the exact contractual EVIDENCE_HEADING into the adapter and enforcement prompt', () => {
+    expect(EVIDENCE_HEADING).toBe('## Evidence gathered by the specialists (the ONLY basis for validation)');
+    expect(REVIEW_ENFORCEMENT_PROMPT).toContain(EVIDENCE_HEADING);
+    const src = readFileSync(new URL('../src/agent/orchestration.ts', import.meta.url), 'utf8');
+    expect(src).toContain(EVIDENCE_HEADING);
+  });
+});
+

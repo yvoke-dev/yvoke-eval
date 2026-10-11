@@ -114,13 +114,24 @@ Models are configured via `answer.model` (or CLI `--answer-model`), `reviewer.mo
 
 | Target Model | Full Model ID | Shorthand / Alias Handling |
 |---|---|---|
-| **Claude Haiku 5.5** | `claude-haiku-5-5` | Pass `claude-haiku-5-5`, `haiku-5.5`, or `haiku 5.5`. **Do not pass bare alias `haiku`** (that defaults to the older `claude-haiku-4-5-20251001`). |
-| **Claude Sonnet 5** | `claude-sonnet-5` | Default alias `sonnet`. |
-| **Claude Sonnet 5.5** | `claude-sonnet-5-5` | Pass `claude-sonnet-5-5`, `sonnet-5.5`, or `sonnet 5.5`. |
-| **Claude Opus 4.8** | `claude-opus-4-8` | Default alias `opus`. |
-| **Claude Opus 5.5** | `claude-opus-5-5` | Pass `claude-opus-5-5`, `opus-5.5`, or `opus 5.5`. |
+| **Claude Haiku 5.5** | `claude-haiku-5-5` | Pass `claude-haiku-5-5`, `haiku-5.5`, `haiku 5.5`, or bare `haiku` (canonicalizes to `claude-haiku-5-5`). |
+| **Claude Sonnet 5.5** | `claude-sonnet-5-5` | Pass `claude-sonnet-5-5`, `sonnet-5.5`, `sonnet 5.5`, or bare `sonnet` (canonicalizes to `claude-sonnet-5-5`). |
+| **Claude Opus 5.5** | `claude-opus-5-5` | Pass `claude-opus-5-5`, `opus-5.5`, `opus 5.5`, or bare `opus` (canonicalizes to `claude-opus-5-5`). |
 
 The harness automatically extracts the concrete runtime model ID returned in the Anthropic Agent SDK's `system.init` message (`msg.model`) and records both the alias and resolved version in `run_meta.json`, `summary.md`, and `eval/runs/OVERVIEW.md`.
+
+### Web Access Configuration (`web.allowedDomains`)
+
+When evaluating playbooks that declare `WebSearch` or `WebFetch`, allowed domains are configured in `yvoke-eval.yaml`:
+
+```yaml
+web:
+  allowedDomains:
+    - docs.oneidentity.com
+    - support.oneidentity.com
+```
+
+If `web.allowedDomains` is omitted or empty, web tool calls fail closed in `canUseTool`, ensuring eval runs only contact approved endpoints matching production policy.
 
 ### Caveat — a replayed answer can be scored as if the model had run
 

@@ -138,16 +138,39 @@ function cmdPromote(cfg: EvalConfig, values: Record<string, unknown>, positional
   for (const c of res.categories) console.log(c);
 }
 
+const CANONICAL_MODELS: Record<string, string> = {
+  haiku: 'claude-haiku-5-5',
+  'claude-haiku': 'claude-haiku-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  'claude-sonnet': 'claude-sonnet-5-5',
+  opus: 'claude-opus-5-5',
+  'claude-opus': 'claude-opus-5-5',
+};
+
 /**
- * Normalizes user-friendly model aliases (e.g. `haiku-5.5`, `haiku 5.5`, `sonnet-5.5`)
- * to their concrete Claude Agent SDK model identifiers (`claude-haiku-5-5`, etc.).
+ * Normalizes user-friendly model aliases (e.g. `haiku`, `haiku-5.5`, `sonnet`, `sonnet-5.5`)
+ * to their concrete Claude Agent SDK model identifiers (`claude-haiku-5-5`, etc.), matching
+ * desktop resolveCanonicalModel.
  */
 export function normalizeModelName(name: string): string {
   const trimmed = name.trim();
+  const lower = trimmed.toLowerCase();
+  if (CANONICAL_MODELS[lower]) return CANONICAL_MODELS[lower];
   if (/^(claude-)?haiku[-\s.]?5[-\s.]?5$/i.test(trimmed)) return 'claude-haiku-5-5';
   if (/^(claude-)?sonnet[-\s.]?5[-\s.]?5$/i.test(trimmed)) return 'claude-sonnet-5-5';
   if (/^(claude-)?opus[-\s.]?5[-\s.]?5$/i.test(trimmed)) return 'claude-opus-5-5';
   return trimmed;
+}
+
+const VALID_THINKING_LEVELS: readonly string[] = ['off', 'low', 'medium', 'high'];
+
+export function parseThinkingLevel(value: unknown): ThinkingLevel {
+  if (value === undefined || value === null) return 'low';
+  const s = String(value).trim().toLowerCase();
+  if (!VALID_THINKING_LEVELS.includes(s)) {
+    throw new UserError(`Invalid thinking level "${value}". Allowed values: ${VALID_THINKING_LEVELS.join(', ')}.`);
+  }
+  return s as ThinkingLevel;
 }
 
 /**
@@ -183,7 +206,7 @@ export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, co
     limit: limitFlag ?? cfg.run?.limit ?? 0,
     merge: (values.merge as boolean | undefined) ?? cfg.run?.merge ?? false,
     answerModel: normalizeModelName((values['answer-model'] as string | undefined) ?? cfg.answer?.model ?? 'sonnet'),
-    thinkingLevel: ((values['thinking'] ?? cfg.answer?.thinkingLevel) as ThinkingLevel) ?? 'low',
+    thinkingLevel: parseThinkingLevel(values['thinking'] ?? cfg.answer?.thinkingLevel),
     reviewerModel: normalizeModelName((values['reviewer-model'] as string | undefined) ?? cfg.reviewer?.model ?? 'opus'),
     mcp: {
       serverBaseUrl: cfg.mcp?.serverBaseUrl ?? 'http://localhost:8080',
@@ -236,7 +259,7 @@ function resolveMas(cfg: EvalConfig): { profile: OrchestratorProfile; tuning: Or
   };
   const role = (r: { model: string; thinkingLevel: string }) => ({
     model: normalizeModelName(r.model),
-    thinkingLevel: r.thinkingLevel as ThinkingLevel,
+    thinkingLevel: parseThinkingLevel(r.thinkingLevel),
   });
   return {
     profile: {

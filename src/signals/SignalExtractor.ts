@@ -37,7 +37,7 @@ const UUID_HEX =
 const CITATION = new RegExp(
   [
     '\\[\\d+\\]',
-    `\\[\\s*(?:(?:chunk_id|document_id|file)=[a-zA-Z0-9_.-]+|${UUID_HEX})`,
+    `\\[\\s*(?:(?:chunk_id|document_id|file)=[a-zA-Z0-9_.-]+|${UUID_HEX})\\s*\\]`,
     '\\[[^\\]\\n]+\\]\\(https?://[^)\\s]+\\)',
   ].join('|'),
 );

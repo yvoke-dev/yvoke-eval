@@ -91,6 +91,12 @@ describe('toRunConfig — grader rubrics are required, never defaulted', () => {
     expect(rc.thinkingLevel).toBe('high');
   });
 
+  it('rejects invalid thinking level values', () => {
+    expect(() => toRunConfig(cfg(), { thinking: 'invalid-level' }, CONTENT)).toThrow(
+      /Invalid thinking level "invalid-level"/,
+    );
+  });
+
   it('normalizes shorthand model names like haiku-5.5 to claude-haiku-5-5', () => {
     const rc = toRunConfig(cfg(), { 'answer-model': 'haiku-5.5', 'reviewer-model': 'sonnet-5.5' }, CONTENT);
     expect(rc.answerModel).toBe('claude-haiku-5-5');
@@ -110,9 +116,17 @@ describe('normalizeModelName', () => {
     expect(normalizeModelName('opus-5.5')).toBe('claude-opus-5-5');
   });
 
-  it('leaves standard aliases untouched', () => {
-    expect(normalizeModelName('haiku')).toBe('haiku');
-    expect(normalizeModelName('sonnet')).toBe('sonnet');
-    expect(normalizeModelName('opus')).toBe('opus');
+  it('canonicalizes bare aliases to claude-*-5-5 matching desktop resolveCanonicalModel', () => {
+    expect(normalizeModelName('haiku')).toBe('claude-haiku-5-5');
+    expect(normalizeModelName('sonnet')).toBe('claude-sonnet-5-5');
+    expect(normalizeModelName('opus')).toBe('claude-opus-5-5');
+    expect(normalizeModelName('claude-haiku')).toBe('claude-haiku-5-5');
+    expect(normalizeModelName('claude-sonnet')).toBe('claude-sonnet-5-5');
+    expect(normalizeModelName('claude-opus')).toBe('claude-opus-5-5');
+  });
+
+  it('leaves custom or fully-specified model IDs untouched', () => {
+    expect(normalizeModelName('claude-3-5-sonnet-20241022')).toBe('claude-3-5-sonnet-20241022');
+    expect(normalizeModelName('gpt-4o')).toBe('gpt-4o');
   });
 });

@@ -140,6 +140,8 @@ describe('ReportWriter — run folder', () => {
       resolvedAnswerModel: 'claude-sonnet-5',
       reviewerModel: 'opus',
       resolvedReviewerModel: 'claude-opus-4-8',
+      masReviewerModel: 'opus',
+      resolvedMasReviewerModel: 'claude-opus-5-5',
       gitSha: 'testsha',
     };
     const overviewPath = join(evalDir, 'runs', 'OVERVIEW.md');
@@ -148,10 +150,12 @@ describe('ReportWriter — run folder', () => {
       const summary = readFileSync(join(runDir, 'summary.md'), 'utf8');
       expect(summary).toContain('sonnet (claude-sonnet-5)');
       expect(summary).toContain('opus (claude-opus-4-8)');
+      expect(summary).toContain('mas reviewer: `opus (claude-opus-5-5)`');
 
       const overview = readFileSync(overviewPath, 'utf8');
       expect(overview).toContain('sonnet (claude-sonnet-5)');
       expect(overview).toContain('opus (claude-opus-4-8)');
+      expect(overview).toContain('opus (claude-opus-5-5)');
     } finally {
       rmSync(runDir, { recursive: true, force: true });
       rmSync(overviewPath, { force: true });

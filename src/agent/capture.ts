@@ -43,13 +43,15 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
   const textParts: string[] = [];
   const tools: Array<ToolInvocation & { id: string }> = [];
   const byId = new Map<string, ToolInvocation & { id: string }>();
-  let usage: Record<string, unknown> = {};
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
   let resultText: string | undefined;
   let isError = false;
   let costUsd: number | undefined;
   let numTurns: number | undefined;
   let sessionId: string | undefined;
   let resolvedModel: string | undefined;
+  let hasSeenResult = false;
 
   for (const msg of messages) {
     const isSubAgent = msg.parent_tool_use_id != null;
@@ -61,6 +63,14 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
         resolvedModel = msg.model;
       }
     } else if (msg.type === 'assistant') {
+      if (!isSubAgent && hasSeenResult) {
+        // The draft from the prior turn is superseded by whatever comes back post-review or in
+        // subsequent turns; drop earlier prose so the delivered message isn't "draft + final"
+        // concatenated (mirroring desktop AgentService.maybeContinueForReview).
+        textParts.length = 0;
+        resultText = undefined;
+        hasSeenResult = false;
+      }
       for (const b of content) {
         if (b.type === 'text' && typeof b.text === 'string' && b.text) {
           if (!isSubAgent) textParts.push(b.text); // composed answer = main thread only
@@ -86,11 +96,18 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
         }
       }
     } else if (msg.type === 'result') {
-      usage = msg.usage ?? {};
+      hasSeenResult = true;
+      const u = msg.usage ?? {};
+      totalInputTokens += num(u.input_tokens);
+      totalOutputTokens += num(u.output_tokens);
       if (typeof msg.result === 'string') resultText = msg.result;
-      isError = msg.is_error === true;
-      costUsd = msg.total_cost_usd;
-      numTurns = msg.num_turns;
+      if (msg.is_error === true) isError = true;
+      if (typeof msg.total_cost_usd === 'number') {
+        costUsd = (costUsd ?? 0) + msg.total_cost_usd;
+      }
+      if (typeof msg.num_turns === 'number') {
+        numTurns = (numTurns ?? 0) + msg.num_turns;
+      }
     }
   }
 
@@ -104,8 +121,8 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
   }
   collect(CHUNK_MARKER, answer, chunkIds);
 
-  const promptTokens = num(usage.input_tokens);
-  const completionTokens = num(usage.output_tokens);
+  const promptTokens = totalInputTokens;
+  const completionTokens = totalOutputTokens;
 
   return {
     answer,

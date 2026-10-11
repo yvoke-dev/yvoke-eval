@@ -164,4 +164,51 @@ describe('bundleFromMessages', () => {
     expect(b.retrievedChunkIds).toEqual([CHUNK]);
     expect(b.retrievedChunkIds).not.toContain(DOC);
   });
+
+  it('enforced multi-turn runs: supersedes draft answer prose and sums usage/cost across results', () => {
+    const msgs: StreamMessage[] = [
+      // Turn 1 draft
+      {
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'DRAFT: widget is red.' }] },
+      },
+      {
+        type: 'result',
+        result: 'DRAFT: widget is red.',
+        usage: { input_tokens: 10, output_tokens: 5 },
+        total_cost_usd: 0.001,
+        num_turns: 1,
+        is_error: false,
+      },
+      // Turn 2 nudge user turn
+      {
+        type: 'user',
+        message: { role: 'user', content: 'Review enforcement nudge' },
+      },
+      // Turn 2 final answer
+      {
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: `FINAL: widget is blue [chunk_id=${CHUNK}].` }] },
+      },
+      {
+        type: 'result',
+        result: `FINAL: widget is blue [chunk_id=${CHUNK}].`,
+        usage: { input_tokens: 20, output_tokens: 7 },
+        total_cost_usd: 0.002,
+        num_turns: 1,
+        is_error: false,
+      },
+    ];
+
+    const b = bundleFromMessages(msgs);
+    expect(b.answer).toBe(`FINAL: widget is blue [chunk_id=${CHUNK}].`);
+    expect(b.answer).not.toContain('DRAFT');
+    expect(b.promptTokens).toBe(30);
+    expect(b.completionTokens).toBe(12);
+    expect(b.totalTokens).toBe(42);
+    expect(b.providerMeta.costUsd).toBeCloseTo(0.003);
+    expect(b.providerMeta.numTurns).toBe(2);
+    expect(b.retrievedChunkIds).toEqual([CHUNK]);
+  });
 });
+

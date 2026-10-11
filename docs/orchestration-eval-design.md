@@ -102,7 +102,7 @@ ASSUMED and unverified.
 
 Only the orchestrator is granted the delegation tool. `orchestration.ts` gives
 `ORCHESTRATOR_AGENT` the delegate token; specialists get `mapSpecialistTools()` and the
-reviewer gets `REVIEWER_TOOLS` (`verify_citations`, `get_section`) — **neither includes
+reviewer gets `REVIEWER_TOOLS` (`verify_citations`) — **neither includes
 `Task`**. So **no sub-agent can delegate**: every real delegation has
 `parent_tool_use_id === null`, and `parentId` is **always `undefined`** in the current
 single-tier topology.

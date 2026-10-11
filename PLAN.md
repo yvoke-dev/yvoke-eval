@@ -31,7 +31,7 @@ All eval data (specs, `runs/`, `baseline/`) lives **inside the new repo**.
 EvalSpecParser (eval_specs.yaml + eval_<cat>.md → EvalQuestion[])
   └─ McpPrompts.list()/getText()  → playbook template + tools[] + codeExecution   (from MCP)
   └─ per question:
-       EvalTask = { modelContent = template + "\n\n---\n\n" + question, allowedTools, thinking, … }
+       EvalTask = { systemPrompt = base + "\n\n---\n\n" + template, modelContent = question, allowedTools, thinking, … }
        AgentRun (Claude Agent SDK → MCP)   → AnswerBundle { answer, toolCalls, chunkIds, tokens, meta }
        SignalExtractor (trace-only, DB-free) → Signals
        Reviewer (Gemini structured judge)    → Verdict
@@ -57,8 +57,8 @@ system prompt are fetched the same way (MCP prompt if exposed; bundled fallback 
 `Bearer ${token}`} } }`, `allowedTools` = the playbook's tools (`mcp__oim__*` + policy extras),
 `model`, `maxThinkingTokens = thinkingBudget(level)`, `settingSources:[]`, `cwd = sandbox`, `env =
 sanitizedEnv()` (drops `ANTHROPIC_API_KEY` → Claude **subscription OAuth** from `~/.claude/`). The
-prompt is a one-shot async generator yielding `{type:'user', message:{role:'user',
-content: modelContent}, parent_tool_use_id:null}`.
+prompt is an async generator yielding `{type:'user', message:{role:'user',
+content: modelContent}, parent_tool_use_id:null}` (multi-turn runs in mas mode drive through `UserTurns`).
 
 **`mas` mode**: `agent:'orchestrator'`, `agents` = `buildOrchestrator(profile)` (orchestrator +
 specialists + reviewer `AgentDefinition`s with per-role Claude models), `forwardSubagentText:true`.

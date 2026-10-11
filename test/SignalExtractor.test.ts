@@ -21,6 +21,14 @@ describe('extractSignals', () => {
     expect(s.mustNotIncludePresent).toEqual([]);
   });
 
+  it('rejects unterminated citation markers', () => {
+    const s = extractSignals(
+      mkQuestion(),
+      mkBundle({ answer: 'Unterminated [chunk_id=11111111-1111-1111-1111-111111111111 is not a citation' }),
+    );
+    expect(s.hasCitations).toBe(false);
+  });
+
   it('flags must_include that is absent (case-insensitive)', () => {
     const q = mkQuestion({ mustInclude: ['AttestationPolicy'] });
     const s = extractSignals(q, mkBundle({ answer: 'a generic answer with no policy names' }));
