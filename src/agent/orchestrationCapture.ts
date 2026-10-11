@@ -89,8 +89,10 @@ export function orchestrationTraceFromMessages(messages: StreamMessage[]): Orche
         attribution.set(id, a);
       }
     } else if (msg.type === 'result') {
-      numTurns = msg.num_turns;
-      isError = msg.is_error === true;
+      if (typeof msg.num_turns === 'number') {
+        numTurns = (numTurns ?? 0) + msg.num_turns;
+      }
+      if (msg.is_error === true) isError = true;
     }
   }
 

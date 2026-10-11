@@ -93,6 +93,19 @@ describe('orchestrationTraceFromMessages', () => {
     ];
     expect(orchestrationTraceFromMessages(errored).isError).toBe(true);
   });
+
+  it('multi-turn runs: sums num_turns and keeps is_error sticky across results', () => {
+    const multiTurn: StreamMessage[] = [
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'draft' }] } },
+      { type: 'result', result: 'draft', usage: {}, num_turns: 3, is_error: true },
+      { type: 'user', message: { role: 'user', content: 'enforcement nudge' } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'final' }] } },
+      { type: 'result', result: 'final', usage: {}, num_turns: 2, is_error: false },
+    ];
+    const trace = orchestrationTraceFromMessages(multiTurn);
+    expect(trace.numTurns).toBe(5);
+    expect(trace.isError).toBe(true);
+  });
 });
 
 describe('orchestrationTraceFromMessages — delegation batches', () => {

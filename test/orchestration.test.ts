@@ -8,6 +8,7 @@ import {
   REVIEWER_SUBAGENT,
   EVIDENCE_HEADING,
   REVIEW_ENFORCEMENT_PROMPT,
+  needsReviewEnforcement,
   type OrchestratorProfile,
   type OrchestratorTuning,
 } from '../src/agent/orchestration';
@@ -267,6 +268,39 @@ describe('buildOrchestrator — designated system prompt resolution', () => {
     expect(r.agents[REVIEWER_SUBAGENT].prompt).not.toContain('DEFAULT CHAT BASE');
     expect(r.agents[REVIEWER_SUBAGENT].prompt).not.toContain('DEFAULT_BASE');
     expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('PROMPT(oim-orchestrator-reviewer)');
+  });
+
+  it('reviewer layers default-chat if explicitly designated in prompt metadata', async () => {
+    const promptsWithMeta: McpPromptInfo[] = [
+      { name: 'oim-orchestrator', title: 'Orchestrator', description: 'desc', tools: [], codeExecution: false },
+      { name: 'oim-orchestrator-reviewer', title: 'Reviewer', description: 'desc', tools: [], codeExecution: false, systemPrompt: 'default-chat' },
+      { name: 'oim-getting-started', title: 'Getting Started', description: 'desc', tools: ['search_corpus'], codeExecution: false },
+      { name: 'oim-developer-api', title: 'Dev API', description: 'desc', tools: ['search_graph_entities'], codeExecution: false },
+    ];
+    const source = {
+      list: async () => promptsWithMeta,
+      getText: async (name: string) => `PROMPT(${name})`,
+    } as unknown as McpPrompts;
+
+    const mockClient = {
+      get: async (name: string) => {
+        if (name === 'default-chat') return 'DEFAULT CHAT BASE';
+        return null;
+      },
+    } as unknown as SystemPromptClient;
+
+    const r = await buildOrchestrator(profile, tuning, source, 'DEFAULT_BASE', mockClient);
+    expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('DEFAULT CHAT BASE');
+  });
+});
+
+describe('needsReviewEnforcement', () => {
+  it('returns false when isError is true, preventing enforcement nudges on failed turns', () => {
+    expect(needsReviewEnforcement({ specialistCallCount: 2, reviewRounds: 0, isError: true })).toBe(false);
+    expect(needsReviewEnforcement({ specialistCallCount: 2, reviewRounds: 0, isError: false })).toBe(true);
+    expect(needsReviewEnforcement({ specialistCallCount: 2, reviewRounds: 0 })).toBe(true);
+    expect(needsReviewEnforcement({ specialistCallCount: 0, reviewRounds: 0, isError: false })).toBe(false);
+    expect(needsReviewEnforcement({ specialistCallCount: 2, reviewRounds: 1, isError: false })).toBe(false);
   });
 });
 

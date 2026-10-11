@@ -21,7 +21,7 @@ export async function resolvePlaybookSystemPrompt(
   defaultPrompt?: string | null,
 ): Promise<string | null> {
   const designated = designatedName?.trim();
-  if (designated && designated !== SYSTEM_PROMPT_NAME && client) {
+  if (designated && client) {
     try {
       const custom = await client.get(designated);
       if (custom && custom.trim().length > 0) {

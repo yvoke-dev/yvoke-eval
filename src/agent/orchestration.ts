@@ -178,8 +178,14 @@ Your earlier draft has been discarded, so whatever you write now is exactly what
  *
  * A run with NO delegations at all is left alone: it is a clarify or a direct refusal, and there is
  * no composed answer worth reviewing. A run that already reviewed needs nothing.
+ * Errored runs are left alone: there is no composed answer worth reviewing (matches desktop nextReviewAction).
  */
-export function needsReviewEnforcement(trace: { reviewRounds: number; specialistCallCount: number }): boolean {
+export function needsReviewEnforcement(trace: {
+  reviewRounds: number;
+  specialistCallCount: number;
+  isError?: boolean;
+}): boolean {
+  if (trace.isError) return false;
   return trace.specialistCallCount > 0 && trace.reviewRounds === 0;
 }
 
