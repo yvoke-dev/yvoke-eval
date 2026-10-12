@@ -98,9 +98,12 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
     for (const t of bundle.toolCalls) {
       if (t.isError) continue;
       const name = stripPrefix(t.name);
-      if (name === 'verify_citations' && t.resultText && t.resultText.includes('FABRICATED')) {
+      // verify_citations is an existence checker, not a retriever; its output does not supply new chunk evidence.
+      if (name === 'verify_citations') {
         continue;
       }
+
+
       if (t.resultText) {
         const matches = t.resultText.match(UUID_REGEX);
         if (matches) {

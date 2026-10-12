@@ -1,11 +1,12 @@
 import { parseArgs } from 'node:util';
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
+
 import os from 'node:os';
 import path from 'node:path';
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, resolveSuite, type EvalConfig } from './config/loadConfig';
-import { runSuite, selectQuestions, type RunConfig } from './run/runSuite';
+import { runSuite, selectQuestions, type RunConfig, type RunSummary } from './run/runSuite';
 import {
   loadResults,
   loadBaseline,
@@ -89,7 +90,12 @@ async function main(): Promise<void> {
   }
 }
 
-async function cmdRun(cfg: EvalConfig, values: Record<string, unknown>, contentRoot: string): Promise<void> {
+export async function cmdRun(
+  cfg: EvalConfig,
+  values: Record<string, unknown>,
+  contentRoot: string,
+  runSuiteFn: (config: RunConfig) => Promise<RunSummary> = runSuite,
+): Promise<void> {
   const runConfig = toRunConfig(cfg, values, contentRoot);
 
   if (values['dry-run']) {
@@ -109,7 +115,8 @@ async function cmdRun(cfg: EvalConfig, values: Record<string, unknown>, contentR
     `Running ${runConfig.categories.length > 0 ? runConfig.categories.join(',') : 'all categories'} ` +
       `via ${answerLabel}, judge=${runConfig.reviewerModel} against ${runConfig.mcp.serverBaseUrl}`,
   );
-  const summary = await runSuite(runConfig);
+  const summary = await runSuiteFn(runConfig);
+
   const abortNote = summary.aborted ? ` [ABORTED: ${summary.abortReason ?? 'early stop'}]` : '';
   console.error(
     `\nDone: ${summary.pass} PASS / ${summary.partial} PARTIAL / ${summary.fail} FAIL / ${summary.error} ERROR (of ${summary.total})${abortNote}`,
@@ -129,7 +136,29 @@ function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positional
 
   const byCat = groupByCategory(loadResults(runDir));
   const baseByCat = loadBaseline(baselineDir, [...byCat.keys()]);
+
+  const runMetaPath = path.join(runDir, 'run_meta.json');
+  if (existsSync(runMetaPath)) {
+    try {
+      const runMeta = JSON.parse(readFileSync(runMetaPath, 'utf8')) as Record<string, unknown>;
+      const runScoring = runMeta['scoringVersion'];
+      for (const cat of byCat.keys()) {
+        const baseMetaPath = path.join(baselineDir, cat, 'run_meta.json');
+        if (existsSync(baseMetaPath)) {
+          const baseMeta = JSON.parse(readFileSync(baseMetaPath, 'utf8')) as Record<string, unknown>;
+          const baseScoring = baseMeta['scoringVersion'];
+          if (runScoring && baseScoring && runScoring !== baseScoring) {
+            console.error(
+              `[WARN] Scoring version mismatch for ${cat}: run is scored with v${runScoring} but baseline is v${baseScoring}.`,
+            );
+          }
+        }
+      }
+    } catch {}
+  }
+
   const report = compareRunToBaseline(basename(runDir), byCat, baseByCat);
+
 
   console.log(renderCompareReport(report));
   if (values['gate-critical'] && report.criticalHardRegressions.length > 0) {

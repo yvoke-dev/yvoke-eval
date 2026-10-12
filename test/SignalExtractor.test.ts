@@ -305,7 +305,7 @@ describe('extractSignals — unverifiedCitations', () => {
     expect(s.unverifiedCitations).toBeUndefined();
   });
 
-  it('does not count verify_citations with FABRICATED as evidence verifying a citation', () => {
+  it('does not count verify_citations output as evidence verifying a citation', () => {
     const q = mkQuestion();
     const s = extractSignals(
       q,
@@ -316,7 +316,7 @@ describe('extractSignals — unverifiedCitations', () => {
           {
             name: 'verify_citations',
             argumentsJson: `{"chunk_id":"${FAKE_UUID}"}`,
-            resultText: `[chunk_id=${FAKE_UUID}] status=FABRICATED`,
+            resultText: `[chunk_id=${FAKE_UUID}] status=REAL`,
             isError: false,
           },
         ],
@@ -324,4 +324,25 @@ describe('extractSignals — unverifiedCitations', () => {
     );
     expect(s.unverifiedCitations).toEqual([FAKE_UUID]);
   });
+
+  it('does not count errored tool results as evidence for citations', () => {
+    const q = mkQuestion();
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${FAKE_UUID}], the setting is enabled.`,
+        retrievedChunkIds: [],
+        toolCalls: [
+          {
+            name: 'get_section',
+            argumentsJson: `{"chunk_id":"${FAKE_UUID}"}`,
+            resultText: `Chunk body for ${FAKE_UUID}`,
+            isError: true,
+          },
+        ],
+      }),
+    );
+    expect(s.unverifiedCitations).toEqual([FAKE_UUID]);
+  });
 });
+

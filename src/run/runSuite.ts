@@ -1,7 +1,10 @@
 import { mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
+import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { UserError, type EvalQuestion, type EvalResult, type ThinkingLevel } from '../types';
+
 import type { AnswerBundle } from '../agent/AnswerBundle';
 import { EvalSpecParser } from '../specs/EvalSpecParser';
 import { McpPrompts, type PromptSource, type McpPromptInfo } from '../mcp/McpPrompts';
@@ -88,9 +91,14 @@ export interface RunDeps {
   prompts: PromptSource;
   /** single-mode answer producer. */
   answerRunner: AnswerRunner;
+  /** multi-agent mode answer producer. */
+  masAnswerRunner?: { run(modelContent: string, opts?: { abortController?: AbortController; expect?: string }): Promise<AnswerBundle> };
   /** Answer-quality judge. */
   judge: Judge;
+  /** Orchestration judge. */
+  orchJudge?: OrchestrationJudge;
 }
+
 
 export async function withTimeout<T>(fn: (ac: AbortController) => Promise<T>, timeoutMs: number, label: string): Promise<T> {
   const ac = new AbortController();
@@ -171,9 +179,11 @@ export async function runSuite(
   const grader = loadGrader(graderPath);
   const structuredModel = new AgentSdkStructuredModel({ sandboxDir: cfg.sandboxDir });
   const judge = deps.judge ?? new ClaudeJudge(structuredModel, { model: cfg.reviewerModel, systemPrompt: grader.prompt });
-  const orchJudge: OrchestrationJudge | null = orchestrationMode
-    ? new ClaudeOrchestrationJudge(structuredModel, { model: cfg.reviewerModel, systemPrompt: grader.prompt })
-    : null;
+  const orchJudge: OrchestrationJudge | null =
+    deps.orchJudge ??
+    (orchestrationMode
+      ? new ClaudeOrchestrationJudge(structuredModel, { model: cfg.reviewerModel, systemPrompt: grader.prompt })
+      : null);
 
   // The production base system prompt, so answers are produced under the same grounding and citation
   // rules as yvoke-desktop. A failure here is fatal by design — see SystemPromptClient.get.
@@ -194,8 +204,11 @@ export async function runSuite(
     if (!cfg.mas) throw new Error('mas mode requires a resolved profile (cfg.mas).');
     const orch = await buildOrchestrator(cfg.mas.profile, cfg.mas.tuning, prompts, systemPrompt, systemPromptClient);
     log(`Orchestrator ready: ${orch.specialistNames.length} specialists (${orch.specialistNames.join(', ')}).`);
-    const masRunner = new MasAnswerRunner({ ...cfg.mcp, sandboxDir: cfg.sandboxDir, webAllowedDomains: cfg.webAllowedDomains }, orch);
+    const masRunner =
+      deps.masAnswerRunner ??
+      new MasAnswerRunner({ ...cfg.mcp, sandboxDir: cfg.sandboxDir, webAllowedDomains: cfg.webAllowedDomains }, orch);
     produce = (q, ac) => masRunner.run(q.question, { abortController: ac, expect: q.expect });
+
     answerModelLabel = cfg.mas.tuning.orchestrator.model;
     answerProvider = 'sdk-mas';
     thinkingLabel = cfg.mas.tuning.orchestrator.thinkingLevel;
@@ -283,9 +296,11 @@ export async function runSuite(
     resolvedAnswerModel: resolvedWorkerModel ?? null,
     answerProvider,
     evalIntent: cfg.evalIntent,
-    scoringVersion: '2.0',
+    scoringVersion: '2.1',
+    harnessGitSha: harnessGitSha(),
     sdkModel: answerModelLabel,
     sdkVersion: agentSdkVersion(),
+
     reviewerModel: cfg.reviewerModel,
     resolvedReviewerModel: resolvedJudgeModel ?? null,
     reviewerProvider: 'claude',
@@ -418,3 +433,15 @@ function agentSdkVersion(): string {
     return 'unknown';
   }
 }
+
+function harnessGitSha(): string {
+  try {
+    const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+    return execSync('git rev-parse --short HEAD', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    return 'nogit';
+  }
+}
+

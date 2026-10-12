@@ -341,17 +341,19 @@ describe('runSuite — judge quota exhaustion aborts suite', () => {
 });
 
 describe('runSuite — scoring version', () => {
-  it('records scoringVersion 2.0 in run_meta.json', async () => {
+  it('records scoringVersion 2.1 and harnessGitSha in run_meta.json', async () => {
     const h = harness();
     const summary = await runSuite(cfg(), () => {}, h.deps);
     try {
       const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
-      expect(meta.scoringVersion).toBe('2.0');
+      expect(meta.scoringVersion).toBe('2.1');
+      expect(meta.harnessGitSha).toBeDefined();
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
     }
   });
 });
+
 
 describe('selectQuestions — orchestration_ie filtering', () => {
   it('filters out orchestration_ie when in specialist intent with no categories specified', () => {
@@ -407,4 +409,57 @@ orchestration_ie:
     }
   });
 });
+
+describe('runSuite — abortController forwarding', () => {
+  it('forwards AbortController to single-mode task.abortController', async () => {
+    const h = harness();
+    const summary = await runSuite(cfg(), () => {}, h.deps);
+    try {
+      expect(h.tasks).toHaveLength(1);
+      expect(h.tasks[0]!.abortController).toBeInstanceOf(AbortController);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+
+  it('forwards AbortController and expect to masAnswerRunner.run', async () => {
+    const h = harness();
+    let capturedOpts: { abortController?: AbortController; expect?: string } | undefined;
+    h.deps.masAnswerRunner = {
+      run: async (_content, opts) => {
+        capturedOpts = opts;
+        return mkBundle({ answer: 'mas answer' });
+      },
+    };
+
+    const masCfg = cfg({
+      mode: 'mas',
+      mas: {
+        profile: {
+          orchestratorPlaybook: 'demo-basics',
+          reviewerPlaybook: 'demo-basics',
+          specialistPlaybooks: ['demo-basics'],
+        },
+        tuning: {
+          orchestrator: { model: 'sonnet', thinkingLevel: 'off' },
+          reviewer: { configuredModel: 'haiku', model: 'haiku', thinkingLevel: 'off' },
+          specialist: { model: 'haiku', thinkingLevel: 'off' },
+          maxReviewRounds: 1,
+          maxSpecialistCalls: 4,
+          orchestratorMaxTurns: 4,
+          specialistMaxTurns: 4,
+        },
+      },
+    });
+
+    const summary = await runSuite(masCfg, () => {}, h.deps);
+    try {
+      expect(capturedOpts?.abortController).toBeInstanceOf(AbortController);
+      expect(capturedOpts?.expect).toBe('answer');
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+});
+
 

@@ -147,7 +147,35 @@ describe('ClaudeJudge', () => {
     await judge.review({ question: mkQuestion(), answer: 'a', signals: SIGNALS, abortController: ac });
     expect(capturedAc).toBe(ac);
   });
+
+  it('plumbs question.critical to parseVerdict so completeness FAIL drives FAIL instead of PARTIAL', async () => {
+    const model: StructuredModel = {
+      async complete() {
+        return {
+          verdict: 'FAIL',
+          dimensions: { routing: 'PASS', grounding: 'PASS', completeness: 'FAIL' },
+          reasoning: 'missing key facts',
+        };
+      },
+    };
+    const judge = new ClaudeJudge(model, { model: 'opus', systemPrompt: 'r' });
+
+    const nonCrit = await judge.review({
+      question: mkQuestion({ critical: false }),
+      answer: 'a',
+      signals: SIGNALS,
+    });
+    expect(nonCrit.verdict).toBe('PARTIAL');
+
+    const crit = await judge.review({
+      question: mkQuestion({ critical: true }),
+      answer: 'a',
+      signals: SIGNALS,
+    });
+    expect(crit.verdict).toBe('FAIL');
+  });
 });
+
 
 describe('deriveVerdictFromDimensions', () => {
   it('returns PARTIAL when completeness is FAIL on non-critical questions', () => {

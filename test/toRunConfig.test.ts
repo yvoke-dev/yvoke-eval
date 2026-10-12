@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { toRunConfig, normalizeModelName, parseCliArgs } from '../src/cli';
+import { describe, it, expect, vi } from 'vitest';
+import { toRunConfig, normalizeModelName, parseCliArgs, cmdRun } from '../src/cli';
 import type { EvalConfig } from '../src/config/loadConfig';
+import type { RunSummary } from '../src/run/runSuite';
+
 
 /** A config with everything toRunConfig needs, so each test can remove exactly one thing. */
 function cfg(overrides: Record<string, unknown> = {}): EvalConfig {
@@ -140,4 +142,54 @@ describe('parseCliArgs', () => {
     expect(runValues['gate-critical']).toBe(true);
   });
 });
+
+describe('cmdRun — exit code behavior', () => {
+  it('exits with code 1 when summary contains ERROR rows', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    const mockSummary: RunSummary = {
+      runDirs: ['/path/to/run'],
+      total: 2,
+      pass: 1,
+      partial: 0,
+      fail: 0,
+      error: 1,
+    };
+    await cmdRun(cfg(), {}, CONTENT, async () => mockSummary);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    exitSpy.mockRestore();
+  });
+
+  it('exits with code 1 when summary was aborted', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    const mockSummary: RunSummary = {
+      runDirs: ['/path/to/run'],
+      total: 2,
+      pass: 1,
+      partial: 0,
+      fail: 0,
+      error: 0,
+      aborted: true,
+      abortReason: 'quota limit',
+    };
+    await cmdRun(cfg(), {}, CONTENT, async () => mockSummary);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    exitSpy.mockRestore();
+  });
+
+  it('does not exit with error when summary has only PASS, PARTIAL, or FAIL', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    const mockSummary: RunSummary = {
+      runDirs: ['/path/to/run'],
+      total: 3,
+      pass: 1,
+      partial: 1,
+      fail: 1,
+      error: 0,
+    };
+    await cmdRun(cfg(), {}, CONTENT, async () => mockSummary);
+    expect(exitSpy).not.toHaveBeenCalled();
+    exitSpy.mockRestore();
+  });
+});
+
 

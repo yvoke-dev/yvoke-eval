@@ -27,7 +27,8 @@ Extracted from the in-repo Spring Boot eval IT (`yvoke-web/src/it/java/.../eval`
   `reviewer.promptFile` in the content repository's config — there is no default, since a rubric is
   knowledge-base specific — and its checksum is pinned into each run's `run_meta.json`
   (`graderPromptSha`), so verdicts stay attributable. Judge is **Claude** (Agent SDK structured
-  model with enforced schema contract).
+  model with defensive JSON extraction and deterministic dimension scoring).
+
 - **All content lives in the content repo:** its `eval/` holds the specs (`eval_specs.yaml` +
   `eval_<category>.md`), `baseline/`, and `runs/`; its `graders/` holds the rubrics. Every relative
   path in `yvoke-eval.yaml` resolves against the directory holding that config.
@@ -51,7 +52,8 @@ The harness answers three different questions, scored differently, at three leve
 
 Both answer modes run end-to-end against a live `localhost:8080` and grade to a full structured
 verdict — **verified** (both smoke-graded PASS), all on `~/.claude` subscription auth (no API key).
-`compare`/`--gate`/`promote` are implemented and tested. 280 offline tests + typecheck green.
+`compare`/`--gate`/`promote` are implemented and tested. 325+ offline tests + typecheck green.
+
 
 - **`single` mode** — one playbook, tools + prompt from MCP, captured to an `AnswerBundle`.
 - **`mas` mode** — orchestrator + specialists + reviewer (per `spike-mas.ts`); retrieval happens
