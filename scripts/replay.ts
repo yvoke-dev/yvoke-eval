@@ -203,12 +203,22 @@ async function main(): Promise<void> {
 
     let res: EvalResult;
     if (o && o.toolEvidence != null && o.answer != null) {
-      const chunkIds = new Set<string>();
-      for (const e of o.toolEvidence) {
-        if (e.resultText) {
-          collect(/\[chunk_id=([0-9a-fA-F-]{8,})\]/g, e.resultText, chunkIds);
-          collect(/\bid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g, e.resultText, chunkIds);
+      let chunkIds: string[];
+      let evidenceTruncated = false;
+      if (Array.isArray(o.retrievedChunkIds) && o.retrievedChunkIds.length > 0) {
+        chunkIds = o.retrievedChunkIds;
+      } else {
+        const idSet = new Set<string>();
+        for (const e of o.toolEvidence) {
+          if (e.resultText) {
+            if (e.resultText.length >= 20_000) {
+              evidenceTruncated = true;
+            }
+            collect(/\[chunk_id=([0-9a-fA-F-]{8,})\]/g, e.resultText, idSet);
+            collect(/\bid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g, e.resultText, idSet);
+          }
         }
+        chunkIds = [...idSet];
       }
       const syntheticBundle: AnswerBundle = {
         answer: o.answer,
@@ -218,13 +228,17 @@ async function main(): Promise<void> {
           argumentsJson: e.argumentsJson,
           resultText: e.resultText,
         })),
-        retrievedChunkIds: [...chunkIds],
+        retrievedChunkIds: chunkIds,
         promptTokens: o.promptTokens,
         completionTokens: o.completionTokens,
         totalTokens: o.totalTokens,
         providerMeta: o.costUsd != null ? { costUsd: o.costUsd } : {},
       };
       const signals = extractSignals(q, syntheticBundle);
+      if (evidenceTruncated && signals.unverifiedCitations && signals.unverifiedCitations.length > 0) {
+        // Truncated tool evidence in legacy run missing full chunk list: do not falsely fail citations
+        signals.unverifiedCitations = undefined;
+      }
       const evidence = o.toolEvidence;
       const verdict = await judge.review({ question: q, answer: o.answer, signals, evidence });
       const isJudgeError = verdict.verdict === 'ERROR';

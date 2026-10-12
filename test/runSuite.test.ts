@@ -3,6 +3,7 @@ import { readFileSync, rmSync, mkdtempSync, writeFileSync, mkdirSync, copyFileSy
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   runSuite,
@@ -344,17 +345,65 @@ describe('runSuite — judge quota exhaustion aborts suite', () => {
 });
 
 describe('runSuite — scoring version and provenance', () => {
-  it('records scoringVersion 2.1, harnessGitSha, contentGitSha, and systemPromptSha in run_meta.json', async () => {
+  it('records scoringVersion 2.2, harnessGitSha, contentGitSha, and systemPromptSha in run_meta.json', async () => {
     const h = harness();
     const config = cfg();
     const summary = await runSuite(config, () => {}, h.deps);
     try {
       const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
-      expect(meta.scoringVersion).toBe('2.1');
+      expect(meta.scoringVersion).toBe('2.2');
       expect(meta.harnessGitSha).toBe(harnessGitSha());
       expect(meta.contentGitSha).toBe(gitShaForDir(config.evalDir));
       expect(typeof meta.systemPromptSha).toBe('string');
       expect(meta.systemPromptSha).toMatch(/^[0-9a-fA-F]{64}$/);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+
+  it('hashes the exact task system prompt including designated prompt text', async () => {
+    const fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('oim-structured')) {
+        return new Response(JSON.stringify({ systemPrompt: 'CUSTOM DESIGNATED STRUCTURED PROMPT' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT CHAT PROMPT' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const prompts: PromptSource = {
+      list: async () => [
+        {
+          name: 'demo-basics',
+          title: 'Basics',
+          description: '',
+          tools: ['search_corpus'],
+          systemPrompt: 'oim-structured',
+        },
+      ],
+      getText: async () => 'PLAYBOOK TEMPLATE TEXT',
+      serverVersion: () => undefined,
+      close: async () => {},
+    };
+
+    const deps: Partial<RunDeps> = {
+      credentials: () => 'ok',
+      fetchFn,
+      prompts,
+      answerRunner: {
+        run: async () => mkBundle({ answer: 'an answer' }),
+      },
+      judge: passJudge,
+    };
+
+    const summary = await runSuite(cfg(), () => {}, deps);
+    try {
+      const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
+      const expectedText = 'CUSTOM DESIGNATED STRUCTURED PROMPT\n\n---\n\nPLAYBOOK TEMPLATE TEXT';
+      const expectedSha = createHash('sha256').update(expectedText).digest('hex');
+      const defaultSha = createHash('sha256').update('DEFAULT CHAT PROMPT\n\n---\n\nPLAYBOOK TEMPLATE TEXT').digest('hex');
+      expect(meta.systemPromptName).toBe('oim-structured');
+      expect(meta.systemPromptSha).toBe(expectedSha);
+      expect(meta.systemPromptSha).not.toBe(defaultSha);
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
     }
@@ -411,6 +460,12 @@ describe('harnessGitSha and gitShaForDir', () => {
       const cleanSha = harnessGitSha(tmp);
       expect(cleanSha).not.toContain('-dirty');
       expect(cleanSha).toMatch(/^[0-9a-fA-F]{7,12}$/);
+
+      // Untracked file in root -> dirty in harnessGitSha
+      writeFileSync(join(tmp, 'untracked_harness.ts'), 'content\n');
+      expect(harnessGitSha(tmp)).toBe(`${cleanSha}-dirty`);
+      rmSync(join(tmp, 'untracked_harness.ts'));
+      expect(harnessGitSha(tmp)).toBe(cleanSha);
 
       // Tracked file modification in root -> dirty in harnessGitSha
       writeFileSync(join(tmp, 'graders', 'oim.md'), 'modified\n');

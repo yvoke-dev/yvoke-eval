@@ -234,6 +234,66 @@ describe('cmdCompare', () => {
     }
   });
 
+  it('warns when systemPromptSha, graderPromptSha, or answerModel mismatch between run and baseline', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-mismatch-'));
+    try {
+      const runDir = join(tmp, 'run-1');
+      const baselineDir = join(tmp, 'baseline');
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+      const sampleResult = [
+        {
+          question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+          verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+          signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+          answer: 'test',
+        },
+      ];
+
+      writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(
+        join(runDir, 'run_meta.json'),
+        JSON.stringify({
+          scoringVersion: '2.2',
+          systemPromptSha: 'sha-sys-run',
+          graderPromptSha: 'sha-grader-run',
+          answerModel: 'claude-haiku-5-5',
+        }),
+      );
+
+      writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(
+        join(baselineDir, 'basics', 'run_meta.json'),
+        JSON.stringify({
+          scoringVersion: '2.2',
+          systemPromptSha: 'sha-sys-base',
+          graderPromptSha: 'sha-grader-base',
+          answerModel: 'claude-sonnet-5-5',
+        }),
+      );
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] System prompt SHA mismatch for basics: run has sha-sys-run but baseline has sha-sys-base.'),
+      );
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Grader prompt SHA mismatch for basics: run has sha-grader-run but baseline has sha-grader-base.'),
+      );
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Answer model mismatch for basics: run used claude-haiku-5-5 but baseline used claude-sonnet-5-5.'),
+      );
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('checks flat baseline run_meta.json when category run_meta does not exist', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-flat-'));
     try {

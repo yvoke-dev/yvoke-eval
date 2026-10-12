@@ -202,7 +202,13 @@ function checkNeedleInText(haystack: string, needle: string): boolean {
     const charAfter = idx + needle.length < haystack.length ? haystack[idx + needle.length] : '';
 
     const validBefore = !needleStartsAlpha || !isAlphaNumeric(charBefore);
-    const validAfter = !needleEndsAlpha || !isAlphaNumeric(charAfter);
+    let validAfter = !needleEndsAlpha || !isAlphaNumeric(charAfter);
+    if (!validAfter && needleEndsAlpha && charAfter === 's') {
+      const charAfterS = idx + needle.length + 1 < haystack.length ? haystack[idx + needle.length + 1] : '';
+      if (!isAlphaNumeric(charAfterS)) {
+        validAfter = true;
+      }
+    }
 
     if (validBefore && validAfter) {
       return true;

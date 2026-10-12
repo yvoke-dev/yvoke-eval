@@ -13,7 +13,7 @@ import { SystemPromptClient, SYSTEM_PROMPT_NAME } from '../server/SystemPromptCl
 import { SdkAnswerRunner, type AnswerRunner } from '../agent/SdkAnswerRunner';
 import { MasAnswerRunner } from '../agent/MasAnswerRunner';
 import { buildOrchestrator, type OrchestratorProfile, type OrchestratorTuning } from '../agent/orchestration';
-import { buildEvalTask } from '../agent/buildTask';
+import { buildEvalTask, resolvePlaybookSystemPrompt } from '../agent/buildTask';
 import { gradeOne, gradeOrchestration } from './grade';
 import { ClaudeJudge, type Judge } from '../reviewer/Judge';
 import { ClaudeOrchestrationJudge, type OrchestrationJudge } from '../reviewer/OrchestrationJudge';
@@ -292,13 +292,37 @@ export async function runSuite(
   const activeJudge = orchestrationMode ? orchJudge : judge;
   const resolvedJudgeModel = activeJudge?.resolvedModel ?? (judge as { resolvedModel?: string })?.resolvedModel;
 
-  const baseSysPromptSha = systemPrompt ? sha256(systemPrompt) : null;
+  const promptList = await prompts.list().catch(() => []);
+  const promptInfoMap = new Map(promptList.map((p) => [p.name, p]));
+  const allPlaybooks = [...new Set(results.map((r) => r.question.playbook).filter((p): p is string => Boolean(p)))];
+  const firstPlaybookInfo = allPlaybooks.length > 0 ? promptInfoMap.get(allPlaybooks[0]) : undefined;
+  const mergedBasePrompt =
+    allPlaybooks.length === 1
+      ? await resolvePlaybookSystemPrompt(firstPlaybookInfo?.systemPrompt, systemPromptClient, systemPrompt)
+      : systemPrompt;
+  let mergedSysPromptText = mergedBasePrompt ?? '';
+  if (allPlaybooks.length === 1) {
+    try {
+      const pbText = await prompts.getText(allPlaybooks[0]);
+      mergedSysPromptText = mergedSysPromptText ? `${mergedSysPromptText}\n\n---\n\n${pbText}` : pbText;
+    } catch {
+      // ignore
+    }
+  }
+  const baseSysPromptSha = mergedSysPromptText
+    ? sha256(mergedSysPromptText)
+    : (systemPrompt ? sha256(systemPrompt) : null);
+  const baseSysPromptName =
+    allPlaybooks.length === 1 && firstPlaybookInfo?.systemPrompt
+      ? firstPlaybookInfo.systemPrompt
+      : (systemPrompt ? SYSTEM_PROMPT_NAME : null);
+
   const meta = {
     answerModel: answerModelLabel,
     resolvedAnswerModel: resolvedWorkerModel ?? null,
     answerProvider,
     evalIntent: cfg.evalIntent,
-    scoringVersion: '2.1',
+    scoringVersion: '2.2',
     harnessGitSha: harnessGitSha(),
     contentGitSha: gitShaForDir(cfg.evalDir),
     sdkModel: answerModelLabel,
@@ -308,7 +332,7 @@ export async function runSuite(
     resolvedReviewerModel: resolvedJudgeModel ?? null,
     reviewerProvider: 'claude',
     thinkingLevel: thinkingLabel,
-    systemPromptName: systemPrompt ? SYSTEM_PROMPT_NAME : null,
+    systemPromptName: baseSysPromptName,
     systemPromptSha: baseSysPromptSha,
     graderPromptSha: grader.sha,
     gitSha: sutSha,
@@ -327,8 +351,6 @@ export async function runSuite(
   if (cfg.merge) {
     runDirs.push(writer.write(cfg.evalDir, meta, results).runDir);
   } else {
-    const promptList = await prompts.list().catch(() => []);
-    const promptInfoMap = new Map(promptList.map((p) => [p.name, p]));
     for (const [cat, list] of groupByCategory(results)) {
       const runId = `${newRunId(answerModelLabel, sutSha)}__${cat}`;
       const catPlaybooks = [...new Set(list.map((r) => r.question.playbook).filter((p): p is string => Boolean(p)))];
@@ -337,7 +359,12 @@ export async function runSuite(
         playbookInfo?.systemPrompt
           ? playbookInfo.systemPrompt
           : (systemPrompt ? SYSTEM_PROMPT_NAME : null);
-      let catSysPromptText = systemPrompt ?? '';
+      const catBasePrompt = await resolvePlaybookSystemPrompt(
+        playbookInfo?.systemPrompt,
+        systemPromptClient,
+        systemPrompt,
+      );
+      let catSysPromptText = catBasePrompt ?? '';
       if (catPlaybooks.length > 0) {
         try {
           const playbookText = await prompts.getText(catPlaybooks[0]);

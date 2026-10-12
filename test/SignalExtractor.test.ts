@@ -512,5 +512,97 @@ describe('extractSignals — unverifiedCitations', () => {
     );
     expect(s2.mustIncludeMissing).toEqual([]);
   });
+
+  it('matches trailing English plural "-s" for needles ending in alphanumeric characters', () => {
+    const q = mkQuestion({
+      mustInclude: ['support team', 'password template', 'internal transfer price', 'subscription'],
+    });
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer:
+          'We have support teams managing password templates, with internal transfer prices and multiple subscriptions.',
+      }),
+    );
+    expect(s.mustIncludeMissing).toEqual([]);
+
+    // Negative check: trailing alphanumeric continuation beyond "-s" must NOT match
+    const qNeg = mkQuestion({
+      mustInclude: ['support team'],
+    });
+    const sNeg = extractSignals(
+      qNeg,
+      mkBundle({
+        answer: 'My support teammate is reviewing the request.',
+      }),
+    );
+    expect(sNeg.mustIncludeMissing).toContain('support team');
+  });
+
+  it('enforces word boundaries on must_not_include to prevent false-positive substring hits', () => {
+    const q = mkQuestion({
+      mustNotInclude: ['SAP'],
+    });
+    // "SAPR3" should NOT trigger must_not_include for "SAP"
+    const s1 = extractSignals(
+      q,
+      mkBundle({
+        answer: 'The connector is SAPR3 in this environment.',
+      }),
+    );
+    expect(s1.mustNotIncludePresent).toEqual([]);
+
+    // Exact word "SAP" does trigger
+    const s2 = extractSignals(
+      q,
+      mkBundle({
+        answer: 'The connector is SAP in this environment.',
+      }),
+    );
+    expect(s2.mustNotIncludePresent).toEqual(['SAP']);
+  });
+
+  it('enforces word boundaries on must_include_any', () => {
+    const q = mkQuestion({
+      mustIncludeAny: [['IApiProvider', 'IApiProviderFor']],
+    });
+    // "IApiProviderFor" matches the second alternative
+    const s1 = extractSignals(
+      q,
+      mkBundle({
+        answer: 'You must implement the IApiProviderFor<T> interface.',
+      }),
+    );
+    expect(s1.mustIncludeMissing).toEqual([]);
+
+    // Neither matches
+    const s2 = extractSignals(
+      q,
+      mkBundle({
+        answer: 'You must implement the ICustomProvider interface.',
+      }),
+    );
+    expect(s2.mustIncludeMissing).toEqual(['IApiProvider | IApiProviderFor']);
+  });
+
+  it('handles leading word boundaries, markdown stripping of underscores/headings, and later occurrences', () => {
+    const q = mkQuestion({
+      mustInclude: ['SAP'],
+    });
+
+    // Leading non-alphanumeric (hyphen) matches, but alphanumeric prefix does not
+    expect(extractSignals(q, mkBundle({ answer: 'This is anti-SAP tooling.' })).mustIncludeMissing).toEqual([]);
+    expect(extractSignals(q, mkBundle({ answer: 'This is notSAP tooling.' })).mustIncludeMissing).toEqual(['SAP']);
+
+    // Markdown underscore and heading stripping
+    expect(extractSignals(q, mkBundle({ answer: 'Review _SAP_ carefully.' })).mustIncludeMissing).toEqual([]);
+    expect(extractSignals(q, mkBundle({ answer: '# SAP System Details' })).mustIncludeMissing).toEqual([]);
+
+    // Later occurrence: first occurrence is inside "SAPR3", but later occurrence is standalone "SAP"
+    expect(
+      extractSignals(q, mkBundle({ answer: 'It is not SAPR3; the true connector is SAP.' })).mustIncludeMissing,
+    ).toEqual([]);
+  });
 });
+
 

@@ -51,6 +51,7 @@ export async function gradeOne(
       latencyMs,
       error: isJudgeError ? (verdict.reasoning || 'reviewer call failed') : null,
       toolEvidence: evidence,
+      retrievedChunkIds: bundle.retrievedChunkIds,
       costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
     };
   } catch (e) {
@@ -76,6 +77,7 @@ export async function gradeOne(
       latencyMs,
       error: msg,
       toolEvidence: toEvidence(bundle.toolCalls),
+      retrievedChunkIds: bundle.retrievedChunkIds,
       costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
     };
   }
@@ -138,6 +140,7 @@ export async function gradeOrchestration(
       latencyMs,
       error: isJudgeError ? (verdict.reasoning || 'orchestration reviewer call failed') : null,
       toolEvidence: toEvidence(bundle.toolCalls),
+      retrievedChunkIds: bundle.retrievedChunkIds,
       costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
     };
   } catch (e) {
@@ -155,6 +158,7 @@ export async function gradeOrchestration(
       latencyMs,
       error: msg,
       toolEvidence: toEvidence(bundle.toolCalls),
+      retrievedChunkIds: bundle.retrievedChunkIds,
       costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
     };
   }

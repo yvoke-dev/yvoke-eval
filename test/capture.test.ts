@@ -66,6 +66,7 @@ describe('bundleFromMessages', () => {
   it('captures answer, tool calls, chunk ids, and tokens from a search run', () => {
     const b = bundleFromMessages(searchStream());
     expect(b.answer).toContain('Manager and Designer');
+    expect(b.answer).not.toContain('Let me search the manuals');
     expect(b.toolCalls).toHaveLength(1);
     expect(b.toolCalls[0].name).toBe(mcpTool('search_corpus'));
     expect(JSON.parse(b.toolCalls[0].argumentsJson).collection).toBe(
@@ -211,5 +212,75 @@ describe('bundleFromMessages', () => {
     expect(b.providerMeta.numTurns).toBe(2);
     expect(b.retrievedChunkIds).toEqual([CHUNK]);
   });
+
+  it('deduplicates answer when draft text precedes verify_citations tool call', () => {
+    const draftText = `Draft answer discussing Manager [chunk_id=${CHUNK}].`;
+    const finalText = `Final verified answer discussing Manager and Designer [chunk_id=${CHUNK}].`;
+    const msgs: StreamMessage[] = [
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'I am loading the search tools first.' },
+            { type: 'tool_use', id: 't1', name: mcpTool('search_corpus'), input: {} },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: `[chunk_id=${CHUNK}]` }] },
+      },
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: draftText },
+            { type: 'tool_use', id: 't2', name: mcpTool('verify_citations'), input: { citations: [`[chunk_id=${CHUNK}]`] } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't2', content: 'verified' }] },
+      },
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: finalText }],
+        },
+      },
+      { type: 'result', result: finalText, usage: {}, is_error: false },
+    ];
+    const b = bundleFromMessages(msgs);
+    expect(b.answer).toBe(finalText);
+    expect(b.answer).not.toContain('loading the search tools');
+    expect(b.answer).not.toContain(draftText);
+  });
+
+  it('falls back to intermediate text when no post-tool text was emitted', () => {
+    const msgs: StreamMessage[] = [
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Pre-tool message only.' },
+            { type: 'tool_use', id: 't1', name: mcpTool('search_corpus'), input: {} },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'results' }] },
+      },
+      { type: 'result', usage: {}, is_error: false },
+    ];
+    const b = bundleFromMessages(msgs);
+    expect(b.answer).toBe('Pre-tool message only.');
+  });
 });
+
 

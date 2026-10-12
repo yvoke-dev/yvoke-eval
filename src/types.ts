@@ -177,6 +177,8 @@ export interface EvalResult {
   error: string | null;
   /** Persisted tool evidence shown to the judge — enables 100% offline re-grading without transcripts. */
   toolEvidence?: import('./agent/AnswerBundle').ToolEvidence[];
+  /** Authoritative retrieved chunk IDs — preserves full citation evidence even when toolEvidence text is truncated. */
+  retrievedChunkIds?: string[];
   /** Cumulative session cost in USD. */
   costUsd?: number;
   // Orchestration eval (Mode 3) — OPTIONAL, present only on the orchestration path. Appended so the

@@ -40,7 +40,8 @@ const CHUNK_MARKER = /\[chunk_id=([0-9a-fA-F-]{8,})\]/g;
 const SEARCH_RESULT_ID = /\bid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g;
 
 export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
-  const textParts: string[] = [];
+  const finalTextParts: string[] = [];
+  const intermediateTextParts: string[] = [];
   const tools: Array<ToolInvocation & { id: string }> = [];
   const byId = new Map<string, ToolInvocation & { id: string }>();
   let totalInputTokens = 0;
@@ -67,14 +68,18 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
         // The draft from the prior turn is superseded by whatever comes back post-review or in
         // subsequent turns; drop earlier prose so the delivered message isn't "draft + final"
         // concatenated (mirroring desktop AgentService.maybeContinueForReview).
-        textParts.length = 0;
+        finalTextParts.length = 0;
+        intermediateTextParts.length = 0;
         resultText = undefined;
         hasSeenResult = false;
       }
+      const msgTextBlocks = content
+        .filter((b) => b.type === 'text' && typeof b.text === 'string' && b.text)
+        .map((b) => b.text as string);
+      const msgHasToolUse = content.some((b) => b.type === 'tool_use');
+
       for (const b of content) {
-        if (b.type === 'text' && typeof b.text === 'string' && b.text) {
-          if (!isSubAgent) textParts.push(b.text); // composed answer = main thread only
-        } else if (b.type === 'tool_use') {
+        if (b.type === 'tool_use') {
           const name = String(b.name);
           if (DELEGATE_NAMES.has(name)) continue; // delegation, not a retrieval tool
           const inv: ToolInvocation & { id: string } = {
@@ -84,6 +89,21 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
           };
           tools.push(inv);
           byId.set(inv.id, inv);
+        }
+      }
+
+      if (!isSubAgent && msgTextBlocks.length > 0) {
+        if (msgHasToolUse) {
+          // This text accompanied a tool call (e.g. pre-search narration or pre-verification draft).
+          // Stored as intermediate text; if a subsequent final answer arrives, it will supersede this.
+          intermediateTextParts.push(...msgTextBlocks);
+          if (finalTextParts.length > 0) {
+            intermediateTextParts.push(...finalTextParts);
+            finalTextParts.length = 0;
+          }
+        } else {
+          // This message has no tool calls (post-tool final answer or pure text response).
+          finalTextParts.push(...msgTextBlocks);
         }
       }
     } else if (msg.type === 'user') {
@@ -112,7 +132,9 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
     }
   }
 
-  const answer = (textParts.join('\n\n').trim() || resultText || '').trim();
+  const finalAnswer = finalTextParts.join('\n\n').trim();
+  const intermediateAnswer = intermediateTextParts.join('\n\n').trim();
+  const answer = (finalAnswer || intermediateAnswer || resultText || '').trim();
 
   const chunkIds = new Set<string>();
   for (const t of tools) {

@@ -156,6 +156,27 @@ export function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, pos
               `[WARN] Scoring version mismatch for ${cat}: run is scored with v${runScoring} but baseline is v${baseScoring}.`,
             );
           }
+          const runSysSha = runMeta['systemPromptSha'];
+          const baseSysSha = baseMeta['systemPromptSha'];
+          if (runSysSha && baseSysSha && runSysSha !== baseSysSha) {
+            console.error(
+              `[WARN] System prompt SHA mismatch for ${cat}: run has ${runSysSha} but baseline has ${baseSysSha}.`,
+            );
+          }
+          const runGraderSha = runMeta['graderPromptSha'];
+          const baseGraderSha = baseMeta['graderPromptSha'];
+          if (runGraderSha && baseGraderSha && runGraderSha !== baseGraderSha) {
+            console.error(
+              `[WARN] Grader prompt SHA mismatch for ${cat}: run has ${runGraderSha} but baseline has ${baseGraderSha}.`,
+            );
+          }
+          const runModel = runMeta['answerModel'];
+          const baseModel = baseMeta['answerModel'];
+          if (runModel && baseModel && runModel !== baseModel) {
+            console.error(
+              `[WARN] Answer model mismatch for ${cat}: run used ${runModel} but baseline used ${baseModel}.`,
+            );
+          }
         } else {
           console.error(
             `[WARN] Scoring version mismatch for ${cat}: run is scored with v${runScoring} but baseline has no run_meta.json.`,

@@ -19,6 +19,7 @@ describe('gradeOne', () => {
     expect(r.error).toBeNull();
     expect(r.answer).toBe(GOOD_ANSWER.bundle.answer);
     expect(r.signals.retrievedChunkCount).toBe(1);
+    expect(r.retrievedChunkIds).toEqual(GOOD_ANSWER.bundle.retrievedChunkIds);
     expect(r.promptTokens).toBe(1200);
     expect(r.totalTokens).toBe(1500);
     expect(r.latencyMs).toBe(1234);
