@@ -348,6 +348,7 @@ describe('runSuite — scoring version', () => {
       const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
       expect(meta.scoringVersion).toBe('2.1');
       expect(meta.harnessGitSha).toBeDefined();
+      expect(meta.contentGitSha).toBeDefined();
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
     }
@@ -461,5 +462,3 @@ describe('runSuite — abortController forwarding', () => {
     }
   });
 });
-
-

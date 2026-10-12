@@ -298,6 +298,7 @@ export async function runSuite(
     evalIntent: cfg.evalIntent,
     scoringVersion: '2.1',
     harnessGitSha: harnessGitSha(),
+    contentGitSha: gitShaForDir(cfg.evalDir),
     sdkModel: answerModelLabel,
     sdkVersion: agentSdkVersion(),
 
@@ -437,11 +438,28 @@ function agentSdkVersion(): string {
 function harnessGitSha(): string {
   try {
     const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-    return execSync('git rev-parse --short HEAD', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
+    const sha = execSync('git rev-parse --short HEAD', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()
       .trim();
+    const status = execSync('git status --porcelain', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+    return status.length > 0 ? `${sha}-dirty` : sha;
   } catch {
     return 'nogit';
   }
 }
 
+function gitShaForDir(dir: string): string | null {
+  try {
+    const sha = execSync('git rev-parse --short HEAD', { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+    const status = execSync('git status --porcelain', { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+    return status.length > 0 ? `${sha}-dirty` : sha;
+  } catch {
+    return null;
+  }
+}

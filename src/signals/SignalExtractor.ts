@@ -44,6 +44,12 @@ const CITATION = new RegExp(
   ].join('|'),
 );
 const SEARCHED_HEADER = /^Searched\s+\*\*(.+?)\*\*/m;
+const UUID_MATCH_REGEX =
+  /(?<![0-9a-fA-F])(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})(?![0-9a-fA-F])/g;
+
+function normalizeUuid(id: string): string {
+  return id.replace(/-/g, '').toLowerCase();
+}
 
 export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Signals {
   const answer = bundle.answer ?? '';
@@ -90,11 +96,10 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
   );
 
   // Cross-reference cited UUIDs against evidence:
-  const UUID_REGEX = new RegExp(UUID_HEX, 'g');
-  const citedUuids = distinct([...(answer.match(UUID_REGEX) ?? [])].map((u) => u.toLowerCase()));
+  const citedUuids = distinct(answer.match(UUID_MATCH_REGEX) ?? []);
   let unverifiedCitations: string[] | undefined;
   if (citedUuids.length > 0) {
-    const knownUuids = new Set(chunkIds.map((u) => u.toLowerCase()));
+    const knownUuids = new Set(chunkIds.map(normalizeUuid));
     for (const t of bundle.toolCalls) {
       if (t.isError) continue;
       const name = stripPrefix(t.name);
@@ -103,15 +108,14 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
         continue;
       }
 
-
       if (t.resultText) {
-        const matches = t.resultText.match(UUID_REGEX);
+        const matches = t.resultText.match(UUID_MATCH_REGEX);
         if (matches) {
-          for (const m of matches) knownUuids.add(m.toLowerCase());
+          for (const m of matches) knownUuids.add(normalizeUuid(m));
         }
       }
     }
-    const missing = citedUuids.filter((u) => !knownUuids.has(u));
+    const missing = citedUuids.filter((u) => !knownUuids.has(normalizeUuid(u)));
     if (missing.length > 0) unverifiedCitations = missing;
   }
 
@@ -177,4 +181,3 @@ export function normalizeNeedle(needle: string): string {
 export function normalizeText(text: string): string {
   return normalizeNeedle(text);
 }
-

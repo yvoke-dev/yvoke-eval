@@ -141,7 +141,7 @@ export function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, pos
   if (existsSync(runMetaPath)) {
     try {
       const runMeta = JSON.parse(readFileSync(runMetaPath, 'utf8')) as Record<string, unknown>;
-      const runScoring = runMeta['scoringVersion'];
+      const runScoring = (runMeta['scoringVersion'] as string | undefined) ?? 'legacy';
       for (const cat of byCat.keys()) {
         let baseMetaPath = path.join(baselineDir, cat, 'run_meta.json');
         if (!existsSync(baseMetaPath)) {
@@ -150,20 +150,26 @@ export function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, pos
         }
         if (existsSync(baseMetaPath)) {
           const baseMeta = JSON.parse(readFileSync(baseMetaPath, 'utf8')) as Record<string, unknown>;
-          const baseScoring = baseMeta['scoringVersion'];
-          if (runScoring && baseScoring && runScoring !== baseScoring) {
+          const baseScoring = (baseMeta['scoringVersion'] as string | undefined) ?? 'legacy';
+          if (runScoring !== baseScoring) {
             console.error(
               `[WARN] Scoring version mismatch for ${cat}: run is scored with v${runScoring} but baseline is v${baseScoring}.`,
             );
           }
+        } else {
+          console.error(
+            `[WARN] Scoring version mismatch for ${cat}: run is scored with v${runScoring} but baseline has no run_meta.json.`,
+          );
         }
       }
-    } catch {}
+    } catch (err) {
+      console.error(
+        `[WARN] Failed to read run or baseline metadata for scoring comparison: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   const report = compareRunToBaseline(basename(runDir), byCat, baseByCat);
-
-
   console.log(renderCompareReport(report));
   if (values['gate-critical'] && report.criticalHardRegressions.length > 0) {
     console.error(`\nGATE FAILED: ${report.criticalHardRegressions.length} critical hard regression(s).`);

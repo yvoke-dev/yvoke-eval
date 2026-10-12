@@ -259,7 +259,6 @@ describe('cmdCompare', () => {
 
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-
       cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
 
       expect(errSpy).toHaveBeenCalledWith(
@@ -271,6 +270,79 @@ describe('cmdCompare', () => {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('warns when baseline run_meta.json has no scoringVersion (legacy baseline)', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-legacy-'));
+    try {
+      const runDir = join(tmp, 'run-1');
+      const baselineDir = join(tmp, 'baseline');
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+      const sampleResult = [
+        {
+          question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+          verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+          signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+          answer: 'test',
+        },
+      ];
+
+      writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(runDir, 'run_meta.json'), JSON.stringify({ scoringVersion: '2.1' }));
+
+      writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(baselineDir, 'basics', 'run_meta.json'), JSON.stringify({}));
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Scoring version mismatch for basics: run is scored with v2.1 but baseline is vlegacy.'),
+      );
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('warns when baseline has no run_meta.json at all', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-nometa-'));
+    try {
+      const runDir = join(tmp, 'run-1');
+      const baselineDir = join(tmp, 'baseline');
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+      const sampleResult = [
+        {
+          question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+          verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+          signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+          answer: 'test',
+        },
+      ];
+
+      writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(runDir, 'run_meta.json'), JSON.stringify({ scoringVersion: '2.1' }));
+
+      writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Scoring version mismatch for basics: run is scored with v2.1 but baseline has no run_meta.json.'),
+      );
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
-
-

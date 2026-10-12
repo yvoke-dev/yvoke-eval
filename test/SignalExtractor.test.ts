@@ -358,5 +358,53 @@ describe('extractSignals — unverifiedCitations', () => {
     );
     expect(s.unverifiedCitations).toEqual([hex32]);
   });
-});
 
+  it('verifies citation when answer cites unhyphenated 32-hex ID but retrieved chunkId has hyphens', () => {
+    const q = mkQuestion();
+    const unhyphenated = REAL_UUID.replace(/-/g, '');
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${unhyphenated}], the setting is enabled.`,
+        retrievedChunkIds: [REAL_UUID],
+        toolCalls: [],
+      }),
+    );
+    expect(s.unverifiedCitations).toBeUndefined();
+  });
+
+  it('verifies citation when answer cites hyphenated UUID but tool result has unhyphenated 32-hex ID', () => {
+    const q = mkQuestion();
+    const unhyphenated = REAL_UUID.replace(/-/g, '');
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${REAL_UUID}], the setting is enabled.`,
+        retrievedChunkIds: [],
+        toolCalls: [
+          {
+            name: 'get_section',
+            argumentsJson: `{"chunk_id":"${unhyphenated}"}`,
+            resultText: `Found section in chunk ${unhyphenated}`,
+            isError: false,
+          },
+        ],
+      }),
+    );
+    expect(s.unverifiedCitations).toBeUndefined();
+  });
+
+  it('does not treat a 64-hex SHA-256 checksum in answer as cited UUIDs', () => {
+    const q = mkQuestion();
+    const sha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `The SHA-256 hash is ${sha256}.`,
+        retrievedChunkIds: [],
+        toolCalls: [],
+      }),
+    );
+    expect(s.unverifiedCitations).toBeUndefined();
+  });
+});
