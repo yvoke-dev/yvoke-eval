@@ -29,28 +29,35 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
  * reverting the assignment left the suite green. Threading it makes the refactor's central invariant
  * testable.
  */
-async function main(): Promise<void> {
-  const { values, positionals } = parseArgs({
+export const CLI_OPTIONS = {
+  config: { type: 'string' },
+  suite: { type: 'string' },
+  category: { type: 'string', multiple: true },
+  limit: { type: 'string' },
+  'answer-model': { type: 'string' },
+  'reviewer-model': { type: 'string' },
+  thinking: { type: 'string' },
+  mode: { type: 'string' },
+  eval: { type: 'string' },
+  expect: { type: 'string' },
+  merge: { type: 'boolean' },
+  'dry-run': { type: 'boolean' },
+  run: { type: 'string' },
+  baseline: { type: 'string' },
+  gate: { type: 'boolean' },
+  'gate-critical': { type: 'boolean' },
+} as const;
+
+export function parseCliArgs(args: string[] = process.argv.slice(2)) {
+  return parseArgs({
+    args,
     allowPositionals: true,
-    options: {
-      config: { type: 'string' },
-      suite: { type: 'string' },
-      category: { type: 'string', multiple: true },
-      limit: { type: 'string' },
-      'answer-model': { type: 'string' },
-      'reviewer-model': { type: 'string' },
-      thinking: { type: 'string' },
-      mode: { type: 'string' },
-      eval: { type: 'string' },
-      expect: { type: 'string' },
-      merge: { type: 'boolean' },
-      'dry-run': { type: 'boolean' },
-      run: { type: 'string' },
-      baseline: { type: 'string' },
-      gate: { type: 'boolean' },
-      'gate-critical': { type: 'boolean' },
-    },
+    options: CLI_OPTIONS,
   });
+}
+
+async function main(): Promise<void> {
+  const { values, positionals } = parseCliArgs();
 
   // --config is CWD-relative, like any other CLI path argument.
   const configPath = values.config ? path.resolve(String(values.config)) : path.join(repoRoot, 'yvoke-eval.yaml');
@@ -241,7 +248,7 @@ function requireGrader(value: string | undefined, key: string, role: string, con
 }
 
 /** What to measure: explicit --eval / config, else derived from execution mode (single→specialist, mas→mas). */
-function resolveEvalIntent(values: Record<string, unknown>, cfg: EvalConfig): 'specialist' | 'mas' | 'orchestration' {
+export function resolveEvalIntent(values: Record<string, unknown>, cfg: EvalConfig): 'specialist' | 'mas' | 'orchestration' {
   const explicit = (values.eval as string | undefined) ?? cfg.run?.eval;
   if (explicit === 'specialist' || explicit === 'mas' || explicit === 'orchestration') return explicit;
   if (explicit) throw new UserError(`Unknown --eval "${explicit}". Use: specialist | mas | orchestration.`);

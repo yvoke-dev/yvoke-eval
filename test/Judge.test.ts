@@ -267,3 +267,53 @@ describe('deriveVerdictFromDimensions', () => {
     expect(v.verdict).toBe('ERROR');
   });
 });
+
+describe('deriveVerdictFromDimensions — orchestration mode (Mode 3)', () => {
+  it('derives FAIL when reviewer_effectiveness is FAIL', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: {
+          delegation_routing: 'PASS',
+          coordination_termination: 'PASS',
+          reviewer_effectiveness: 'FAIL',
+        },
+        reasoning: '',
+      },
+      ORCH_DIMENSIONS,
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('derives PARTIAL when any dimension is PARTIAL and none is FAIL', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PARTIAL',
+        dimensions: {
+          delegation_routing: 'PASS',
+          coordination_termination: 'PASS',
+          reviewer_effectiveness: 'PARTIAL',
+        },
+        reasoning: '',
+      },
+      ORCH_DIMENSIONS,
+    );
+    expect(v.verdict).toBe('PARTIAL');
+  });
+
+  it('derives PASS when all non-NA dimensions are PASS', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: {
+          delegation_routing: 'PASS',
+          coordination_termination: 'PASS',
+          reviewer_effectiveness: 'PASS',
+        },
+        reasoning: '',
+      },
+      ORCH_DIMENSIONS,
+    );
+    expect(v.verdict).toBe('PASS');
+  });
+});

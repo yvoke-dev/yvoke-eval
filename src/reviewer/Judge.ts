@@ -2,6 +2,7 @@ import type { EvalQuestion, Signals, Verdict } from '../types';
 import type { ToolEvidence } from '../agent/AnswerBundle';
 import { errorVerdict } from '../types';
 import { DIMENSIONS, VERDICT_SCHEMA, VERDICT_CONTRACT } from './VerdictSchema';
+import { ORCH_DIMENSIONS } from './OrchestrationVerdictSchema';
 import { buildUserMessage } from './buildUserMessage';
 
 export interface JudgeRequest {
@@ -41,15 +42,16 @@ export interface StructuredModel {
 
 /**
  * Derive overall verdict deterministically from dimension scores matching rubric:
- * - FAIL if any hard constraint fails: stop_rule FAIL, no_fabrication FAIL, grounding FAIL,
- *   or on critical questions completeness/routing FAIL.
- * - PASS only if all applicable (non-NA) dimensions are PASS.
- * - PARTIAL otherwise (e.g. gaps in completeness, routing, or citations on non-critical questions).
+ * - Orchestration (Mode 3): FAIL if any dimension is FAIL; PASS if all non-NA are PASS; PARTIAL otherwise.
+ * - Answer-quality (Mode 1 & 2): FAIL if any hard constraint fails (stop_rule FAIL, no_fabrication FAIL,
+ *   grounding FAIL, or on critical questions completeness/routing FAIL). PASS only if all non-NA are PASS.
+ *   PARTIAL otherwise.
  */
 export function deriveVerdictFromDimensions(
   dimensions: Record<string, string>,
   rawVerdict?: string,
   isCritical: boolean = false,
+  dims: readonly string[] = DIMENSIONS,
 ): string {
   const vals = Object.values(dimensions);
   const nonNa = vals.filter((v) => v !== 'NA');
@@ -58,7 +60,19 @@ export function deriveVerdictFromDimensions(
     return rawVerdict && rawVerdict !== 'ERROR' ? rawVerdict : (rawVerdict ?? 'ERROR');
   }
 
-  // Hard constraints from rubric:
+  // Check if evaluating orchestration dimensions (Mode 3):
+  const isOrch =
+    dims.some((d) => (ORCH_DIMENSIONS as readonly string[]).includes(d)) ||
+    Object.keys(dimensions).some((d) => (ORCH_DIMENSIONS as readonly string[]).includes(d));
+
+  if (isOrch) {
+    if (vals.some((v) => v === 'FAIL')) return 'FAIL';
+    if (vals.some((v) => v === 'ERROR')) return 'ERROR';
+    if (nonNa.every((v) => v === 'PASS')) return 'PASS';
+    return 'PARTIAL';
+  }
+
+  // Hard constraints from answer-quality rubric:
   if (
     dimensions['stop_rule'] === 'FAIL' ||
     dimensions['no_fabrication'] === 'FAIL' ||
@@ -98,7 +112,7 @@ export function parseVerdict(
   for (const dim of dims) {
     dimensions[dim] = pickEnum(dimsIn[dim], ['score', 'value', 'verdict', 'rating']) ?? 'NA';
   }
-  const derivedVerdict = deriveVerdictFromDimensions(dimensions, rawVerdict, isCritical);
+  const derivedVerdict = deriveVerdictFromDimensions(dimensions, rawVerdict, isCritical, dims);
   const verdict = derivedVerdict;
   let reasoning = typeof o.reasoning === 'string' ? o.reasoning : '';
   if (rawVerdict !== 'ERROR' && rawVerdict !== derivedVerdict) {

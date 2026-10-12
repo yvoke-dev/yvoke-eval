@@ -341,11 +341,9 @@ export function selectQuestions(cfg: RunConfig): EvalQuestion[] {
   const all = new EvalSpecParser(cfg.evalDir, known).parse();
   const wanted = cfg.categories.length > 0 ? new Set(cfg.categories) : null;
   const byCategory = wanted ? all.filter((q) => wanted.has(q.category)) : all;
-  const intentFiltered = cfg.categories.length > 0
-    ? byCategory
-    : cfg.evalIntent === 'orchestration'
-      ? byCategory.filter((q) => q.category === 'orchestration_ie' || q.expectedSpecialists !== undefined)
-      : byCategory.filter((q) => q.category !== 'orchestration_ie');
+  const intentFiltered = cfg.evalIntent === 'orchestration'
+    ? byCategory.filter((q) => q.category === 'orchestration_ie' || q.expectedSpecialists !== undefined)
+    : byCategory.filter((q) => q.category !== 'orchestration_ie' && q.expectedSpecialists === undefined);
   // Applied before the per-category cap, so `--expect clarify --limit 2` means two CLARIFY
   // questions per category rather than two questions of which some may be clarify.
   const filtered = cfg.expect ? intentFiltered.filter((q) => q.expect === cfg.expect) : intentFiltered;

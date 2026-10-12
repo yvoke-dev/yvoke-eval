@@ -122,4 +122,9 @@ describe('MasAnswerRunner.run — the enforcement is actually wired', () => {
   it('records whether the nudge was needed, so reviewRounds can be read correctly', () => {
     expect(src).toMatch(/reviewEnforced:\s*enforced/);
   });
+
+  it('forwards opts.abortController to SDK options', () => {
+    expect(src).toMatch(/abortController:\s*opts\?\.abortController/);
+  });
 });
+

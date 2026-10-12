@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toRunConfig, normalizeModelName } from '../src/cli';
+import { toRunConfig, normalizeModelName, parseCliArgs } from '../src/cli';
 import type { EvalConfig } from '../src/config/loadConfig';
 
 /** A config with everything toRunConfig needs, so each test can remove exactly one thing. */
@@ -130,3 +130,14 @@ describe('normalizeModelName', () => {
     expect(normalizeModelName('gpt-4o')).toBe('gpt-4o');
   });
 });
+
+describe('parseCliArgs', () => {
+  it('parses --gate-critical flag in compare/run invocations', () => {
+    const { values: compareValues } = parseCliArgs(['compare', 'run1', '--gate-critical']);
+    expect(compareValues['gate-critical']).toBe(true);
+
+    const { values: runValues } = parseCliArgs(['run', '--gate-critical']);
+    expect(runValues['gate-critical']).toBe(true);
+  });
+});
+

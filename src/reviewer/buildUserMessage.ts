@@ -38,9 +38,6 @@ export function buildUserMessage(
   out.push(`must_not_include_present: ${fmtList(s.mustNotIncludePresent)}`);
   out.push(`expected_tools_missing: ${fmtList(s.expectedToolsMissing)}`);
   out.push(`answer_has_citations: ${s.hasCitations}`);
-  if (s.unverifiedCitations && s.unverifiedCitations.length > 0) {
-    out.push(`unverified_citations (cited UUIDs never returned by any tool): ${fmtList(s.unverifiedCitations)}`);
-  }
 
   out.push('');
   out.push('## Model answer to grade');

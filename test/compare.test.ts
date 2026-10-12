@@ -73,6 +73,8 @@ describe('compareRunToBaseline', () => {
     const byCat = groupByCategory(results);
     const baseByCat = loadBaseline(baselineDir, [...byCat.keys()]);
     const report = compareRunToBaseline('self', byCat, baseByCat);
+    expect(report.gated).toBe(false);
+    expect(report.hardRegressions).toHaveLength(0);
     expect(report.categories[0].runPass).toBe(3);
   });
 
@@ -90,5 +92,36 @@ describe('compareRunToBaseline', () => {
     expect(rep2.gated).toBe(true);
     expect(rep2.hardRegressions).toHaveLength(1);
     expect(rep2.criticalHardRegressions).toHaveLength(1);
+  });
+});
+
+describe('effectiveVerdict', () => {
+  it('preserves ERROR verdict even on critical questions with missing tokens', () => {
+    const r = mkResult('Q1', 'ERROR', [], true);
+    r.signals.mustIncludeMissing = ['MissingToken'];
+    expect(effectiveVerdict(r)).toBe('ERROR');
+  });
+
+  it('preserves ERROR when error string is present', () => {
+    const r = mkResult('Q1', 'PASS', [], true);
+    r.error = 'timeout error';
+    expect(effectiveVerdict(r)).toBe('ERROR');
+  });
+
+  it('derives FAIL when must_not_include is present', () => {
+    const r = mkResult('Q1', 'PASS', ['Bait.exe'], false);
+    expect(effectiveVerdict(r)).toBe('FAIL');
+  });
+
+  it('derives FAIL when critical question misses must_include', () => {
+    const r = mkResult('Q1', 'PASS', [], true);
+    r.signals.mustIncludeMissing = ['MissingToken'];
+    expect(effectiveVerdict(r)).toBe('FAIL');
+  });
+
+  it('does not derive FAIL on non-critical question missing must_include', () => {
+    const r = mkResult('Q1', 'PARTIAL', [], false);
+    r.signals.mustIncludeMissing = ['MissingToken'];
+    expect(effectiveVerdict(r)).toBe('PARTIAL');
   });
 });

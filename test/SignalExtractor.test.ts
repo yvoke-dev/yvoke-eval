@@ -239,3 +239,89 @@ describe('extractSignals — whitespace and needle boundary handling', () => {
     expect(s.mustIncludeMissing).toEqual([]);
   });
 });
+
+describe('extractSignals — toolsFired and errored tool calls', () => {
+  it('excludes errored tool calls from toolsFired', () => {
+    const q = mkQuestion({ expectToolCalled: ['search_corpus'] });
+    const s = extractSignals(
+      q,
+      mkBundle({
+        toolCalls: [
+          { name: 'mcp__yvoke__search_corpus', argumentsJson: '{}', resultText: 'denied', isError: true },
+        ],
+      }),
+    );
+    expect(s.toolsFired).toEqual([]);
+    expect(s.expectedToolsMissing).toEqual(['search_corpus']);
+  });
+
+  it('includes intercepted ask_clarifying_question even when isError is true', () => {
+    const q = mkQuestion({ expectToolCalled: ['ask_clarifying_question'] });
+    const s = extractSignals(
+      q,
+      mkBundle({
+        toolCalls: [
+          {
+            name: 'mcp__yvoke__ask_clarifying_question',
+            argumentsJson: '{"question":"Which version?"}',
+            resultText: 'Captured by the eval harness',
+            isError: true,
+          },
+        ],
+      }),
+    );
+    expect(s.toolsFired).toEqual(['ask_clarifying_question']);
+    expect(s.expectedToolsMissing).toEqual([]);
+  });
+});
+
+describe('extractSignals — unverifiedCitations', () => {
+  const FAKE_UUID = '12345678-1234-1234-1234-123456789abc';
+  const REAL_UUID = '87654321-4321-4321-4321-cba987654321';
+
+  it('flags cited UUIDs not present in retrieved chunks or tool evidence', () => {
+    const q = mkQuestion();
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${FAKE_UUID}], the setting is enabled.`,
+        retrievedChunkIds: [],
+        toolCalls: [],
+      }),
+    );
+    expect(s.unverifiedCitations).toEqual([FAKE_UUID]);
+  });
+
+  it('does not flag cited UUIDs that appear in retrieved chunks', () => {
+    const q = mkQuestion();
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${REAL_UUID}], the setting is enabled.`,
+        retrievedChunkIds: [REAL_UUID],
+        toolCalls: [],
+      }),
+    );
+    expect(s.unverifiedCitations).toBeUndefined();
+  });
+
+  it('does not count verify_citations with FABRICATED as evidence verifying a citation', () => {
+    const q = mkQuestion();
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${FAKE_UUID}], the setting is enabled.`,
+        retrievedChunkIds: [],
+        toolCalls: [
+          {
+            name: 'verify_citations',
+            argumentsJson: `{"chunk_id":"${FAKE_UUID}"}`,
+            resultText: `[chunk_id=${FAKE_UUID}] status=FABRICATED`,
+            isError: false,
+          },
+        ],
+      }),
+    );
+    expect(s.unverifiedCitations).toEqual([FAKE_UUID]);
+  });
+});

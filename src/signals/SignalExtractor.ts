@@ -1,5 +1,6 @@
 import type { EvalQuestion, Signals } from '../types';
 import type { AnswerBundle, ToolInvocation } from '../agent/AnswerBundle';
+import { isClarifyTool } from '../agent/policy';
 
 /**
  * Deterministic, LLM-free signal extraction — derived entirely from the answer text + the SDK/MCP
@@ -46,7 +47,11 @@ const SEARCHED_HEADER = /^Searched\s+\*\*(.+?)\*\*/m;
 
 export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Signals {
   const answer = bundle.answer ?? '';
-  const toolsFired = distinct(bundle.toolCalls.filter((t) => !t.isError).map((t) => stripPrefix(t.name)));
+  const toolsFired = distinct(
+    bundle.toolCalls
+      .filter((t) => !t.isError || isClarifyTool(t.name))
+      .map((t) => stripPrefix(t.name)),
+  );
 
   const searchCollections = distinct(
     bundle.toolCalls.map((t) => collectionArg(t.argumentsJson)).filter(isString),
@@ -91,6 +96,11 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
   if (citedUuids.length > 0) {
     const knownUuids = new Set(chunkIds.map((u) => u.toLowerCase()));
     for (const t of bundle.toolCalls) {
+      if (t.isError) continue;
+      const name = stripPrefix(t.name);
+      if (name === 'verify_citations' && t.resultText && t.resultText.includes('FABRICATED')) {
+        continue;
+      }
       if (t.resultText) {
         const matches = t.resultText.match(UUID_REGEX);
         if (matches) {

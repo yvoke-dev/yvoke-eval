@@ -41,6 +41,30 @@ describe('ClaudeOrchestrationJudge', () => {
     expect(captured?.user).toContain('isReviewer=true');
   });
 
+  it('passes abortController to structuredModel.complete', async () => {
+    let capturedAc: AbortController | undefined;
+    const model: StructuredModel = {
+      async complete(input) {
+        capturedAc = input.abortController;
+        return {
+          verdict: 'PASS',
+          dimensions: { delegation_routing: 'PASS', coordination_termination: 'PASS', reviewer_effectiveness: 'PASS' },
+          reasoning: 'ok',
+        };
+      },
+    };
+    const judge = new ClaudeOrchestrationJudge(model, { model: 'opus', systemPrompt: 'r' });
+    const ac = new AbortController();
+    await judge.review({
+      question: mkQuestion(),
+      answer: 'a',
+      orchestrationSignals: mkOrchestrationSignals(),
+      trace: mkTrace(),
+      abortController: ac,
+    });
+    expect(capturedAc).toBe(ac);
+  });
+
   it('returns an ERROR verdict when the model throws', async () => {
     const model: StructuredModel = {
       async complete() {
@@ -58,3 +82,4 @@ describe('ClaudeOrchestrationJudge', () => {
     expect(v.reasoning).toContain('orch boom');
   });
 });
+

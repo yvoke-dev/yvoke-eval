@@ -21,6 +21,7 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, resolveSuite } from '../src/config/loadConfig';
 import { EvalSpecParser } from '../src/specs/EvalSpecParser';
+import { resolveEvalIntent } from '../src/cli';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(repoRoot, 'src', 'cli.ts');
@@ -59,7 +60,8 @@ function main(): void {
     ? (cfg.evalDir ?? './eval')
     : path.join(contentRoot, cfg.evalDir ?? './eval');
 
-  const categories = selectCategories(evalDir, values.only, values.from);
+  const evalIntent = resolveEvalIntent(values, cfg);
+  const categories = selectCategories(evalDir, evalIntent, values.only, values.from);
   if (categories.length === 0) throw new Error(`No categories selected from ${evalDir}.`);
 
   console.error(`${categories.length} categor${categories.length === 1 ? 'y' : 'ies'} from ${evalDir}:`);
@@ -103,8 +105,12 @@ function cli(args: string[], values: Record<string, unknown>): boolean {
 }
 
 /** Spec order is the suite's own order, so a sweep runs in the order the author listed. */
-function selectCategories(evalDir: string, only?: string, from?: string): string[] {
-  const all = [...new Set(new EvalSpecParser(evalDir).parse().map((q) => q.category))];
+function selectCategories(evalDir: string, evalIntent: string, only?: string, from?: string): string[] {
+  const allQuestions = new EvalSpecParser(evalDir).parse();
+  const applicable = evalIntent === 'orchestration'
+    ? allQuestions.filter((q) => q.category === 'orchestration_ie' || q.expectedSpecialists !== undefined)
+    : allQuestions.filter((q) => q.category !== 'orchestration_ie' && q.expectedSpecialists === undefined);
+  const all = [...new Set(applicable.map((q) => q.category))];
 
   let picked = all;
   if (only) {

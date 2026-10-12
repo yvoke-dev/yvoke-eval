@@ -106,4 +106,31 @@ describe('SdkAnswerRunner — Prompt Assembly & Clean User Message', () => {
     expect(capturedCalls).toHaveLength(1);
     expect(capturedCalls[0]!.options.systemPrompt).toBe('');
   });
+
+  it('passes task.abortController to options.abortController', async () => {
+    capturedCalls.length = 0;
+    const runner = new SdkAnswerRunner({
+      serverBaseUrl: 'http://localhost:8080',
+      bearer: 'tok',
+      transport: 'http',
+      sandboxDir: '/tmp/sandbox',
+      maxTurns: 5,
+    });
+
+    const ac = new AbortController();
+    const task: EvalTask = {
+      question: mkQuestion(),
+      modelContent: 'Plain question?',
+      answerModel: 'claude-3-5-sonnet',
+      systemPrompt: null,
+      thinkingLevel: 'low',
+      codeExecution: true,
+      abortController: ac,
+    };
+
+    await runner.run(task);
+    expect(capturedCalls).toHaveLength(1);
+    expect(capturedCalls[0]!.options.abortController).toBe(ac);
+  });
 });
+

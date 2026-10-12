@@ -45,4 +45,16 @@ describe('gradeOne', () => {
     expect(r.signals.mustIncludeMissing).toEqual([]);
     expect(r.totalTokens).toBe(0);
   });
+
+  it('preserves judge ERROR verdict on critical question without overwriting to FAIL', async () => {
+    const errorJudge: Judge = {
+      async review() {
+        return { verdict: 'ERROR', dimensions: {}, reasoning: 'quota limit reached', evidence: [] };
+      },
+    };
+    const q = mkQuestion({ critical: true, mustInclude: ['MustBePresent'] });
+    const r = await gradeOne(q, mkBundle({ answer: 'nothing here' }), errorJudge, 5);
+    expect(r.verdict.verdict).toBe('ERROR');
+    expect(r.error).toBe('quota limit reached');
+  });
 });
