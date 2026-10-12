@@ -435,13 +435,12 @@ function agentSdkVersion(): string {
   }
 }
 
-function harnessGitSha(): string {
+export function harnessGitSha(repoRoot = fileURLToPath(new URL('../..', import.meta.url))): string {
   try {
-    const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
     const sha = execSync('git rev-parse --short HEAD', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()
       .trim();
-    const status = execSync('git status --porcelain -uno', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
+    const status = execSync('git status --porcelain', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()
       .trim();
     return status.length > 0 ? `${sha}-dirty` : sha;
@@ -450,12 +449,15 @@ function harnessGitSha(): string {
   }
 }
 
-function gitShaForDir(dir: string): string | null {
+export function gitShaForDir(dir: string): string | null {
   try {
     const sha = execSync('git rev-parse --short HEAD', { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()
       .trim();
-    const status = execSync('git status --porcelain -uno', { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] })
+    const status = execSync("git status --porcelain -- . ':!eval/runs' ':!eval/runs/**' ':!runs' ':!runs/**'", {
+      cwd: dir,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
       .toString()
       .trim();
     return status.length > 0 ? `${sha}-dirty` : sha;

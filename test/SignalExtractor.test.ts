@@ -407,4 +407,41 @@ describe('extractSignals — unverifiedCitations', () => {
     );
     expect(s.unverifiedCitations).toBeUndefined();
   });
+
+  it('case-folds uppercase and mixed-case cited and evidence UUIDs', () => {
+    const q = mkQuestion();
+    const upperUuid = '8F7C1A2B-3D4E-4F50-8A1B-2C3D4E5F6071';
+    const lowerUnhyphenated = '8f7c1a2b3d4e4f508a1b2c3d4e5f6071';
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${upperUuid}], the setting is enabled.`,
+        retrievedChunkIds: [lowerUnhyphenated],
+        toolCalls: [],
+      }),
+    );
+    expect(s.unverifiedCitations).toBeUndefined();
+  });
+
+  it('normalizes UUIDs found in tool resultText against answer citations with different case and hyphens', () => {
+    const q = mkQuestion();
+    const toolHexUpper = 'ABCDEF1234567890ABCDEF1234567890';
+    const answerHyphenLower = 'abcdef12-3456-7890-abcd-ef1234567890';
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${answerHyphenLower}], the setting is enabled.`,
+        retrievedChunkIds: [],
+        toolCalls: [
+          {
+            name: 'get_section',
+            argumentsJson: `{"chunk_id":"${toolHexUpper}"}`,
+            resultText: `Found section in chunk ${toolHexUpper}`,
+            isError: false,
+          },
+        ],
+      }),
+    );
+    expect(s.unverifiedCitations).toBeUndefined();
+  });
 });

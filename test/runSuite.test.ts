@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, rmSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { execSync } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
@@ -8,6 +9,8 @@ import {
   selectQuestions,
   withTimeout,
   CachedPromptSource,
+  harnessGitSha,
+  gitShaForDir,
   type RunConfig,
   type RunDeps,
 } from '../src/run/runSuite';
@@ -347,10 +350,57 @@ describe('runSuite — scoring version', () => {
     try {
       const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
       expect(meta.scoringVersion).toBe('2.1');
-      expect(meta.harnessGitSha).toBeDefined();
-      expect(meta.contentGitSha).toBeDefined();
+      expect(typeof meta.harnessGitSha).toBe('string');
+      expect(meta.harnessGitSha).toMatch(/^[0-9a-fA-F]{7,40}(-dirty)?$/);
+      expect(typeof meta.contentGitSha).toBe('string');
+      expect(meta.contentGitSha).toMatch(/^[0-9a-fA-F]{7,40}(-dirty)?$/);
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+});
+
+describe('harnessGitSha and gitShaForDir', () => {
+  it('detects clean and dirty working trees including pathspec exclusion for eval/runs', () => {
+    const tmp = mkdtempSync(join(os.tmpdir(), 'yvoke-git-'));
+    try {
+      execSync('git init -b main', { cwd: tmp, stdio: 'ignore' });
+      execSync('git config user.email "test@example.com"', { cwd: tmp, stdio: 'ignore' });
+      execSync('git config user.name "Test"', { cwd: tmp, stdio: 'ignore' });
+      writeFileSync(join(tmp, 'file.txt'), 'hello\n');
+      execSync('git add file.txt && git commit -m "initial"', { cwd: tmp, stdio: 'ignore' });
+
+      // Clean tree
+      const cleanSha = harnessGitSha(tmp);
+      expect(cleanSha).not.toContain('-dirty');
+      expect(cleanSha).toMatch(/^[0-9a-fA-F]{7,12}$/);
+
+      // Tracked file modification -> dirty
+      writeFileSync(join(tmp, 'file.txt'), 'hello modified\n');
+      expect(harnessGitSha(tmp)).toBe(`${cleanSha}-dirty`);
+
+      // Restore tracked file -> clean again
+      execSync('git checkout file.txt', { cwd: tmp, stdio: 'ignore' });
+      expect(harnessGitSha(tmp)).toBe(cleanSha);
+
+      // Untracked file -> dirty in harnessGitSha
+      writeFileSync(join(tmp, 'untracked.txt'), 'new\n');
+      expect(harnessGitSha(tmp)).toBe(`${cleanSha}-dirty`);
+      rmSync(join(tmp, 'untracked.txt'));
+
+      // In gitShaForDir: untracked file inside eval/runs/ does NOT mark dirty
+      mkdirSync(join(tmp, 'eval', 'runs'), { recursive: true });
+      writeFileSync(join(tmp, 'eval', 'runs', 'result.json'), '{"output":1}');
+      const contentSha = gitShaForDir(tmp);
+      expect(contentSha).toBe(cleanSha);
+      expect(contentSha).not.toContain('-dirty');
+
+      // In gitShaForDir: untracked file outside eval/runs/ DOES mark dirty
+      mkdirSync(join(tmp, 'eval', 'specs'), { recursive: true });
+      writeFileSync(join(tmp, 'eval', 'specs', 'new.yaml'), 'spec: 1');
+      expect(gitShaForDir(tmp)).toBe(`${cleanSha}-dirty`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
     }
   });
 });

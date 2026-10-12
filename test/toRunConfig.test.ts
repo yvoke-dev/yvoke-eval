@@ -345,4 +345,80 @@ describe('cmdCompare', () => {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('warns when run_meta.json has no scoringVersion and baseline has one', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-runlegacy-'));
+    try {
+      const runDir = join(tmp, 'run-1');
+      const baselineDir = join(tmp, 'baseline');
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+      const sampleResult = [
+        {
+          question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+          verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+          signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+          answer: 'test',
+        },
+      ];
+
+      writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(runDir, 'run_meta.json'), JSON.stringify({})); // no scoringVersion
+
+      writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(baselineDir, 'basics', 'run_meta.json'), JSON.stringify({ scoringVersion: '2.1' }));
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Scoring version mismatch for basics: run is scored with vlegacy but baseline is v2.1.'),
+      );
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('logs a warning when metadata reading fails due to malformed JSON', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-badjson-'));
+    try {
+      const runDir = join(tmp, 'run-1');
+      const baselineDir = join(tmp, 'baseline');
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+      const sampleResult = [
+        {
+          question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+          verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+          signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+          answer: 'test',
+        },
+      ];
+
+      writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(runDir, 'run_meta.json'), 'not-valid-json{');
+
+      writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(baselineDir, 'basics', 'run_meta.json'), JSON.stringify({ scoringVersion: '2.1' }));
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Failed to read run or baseline metadata for scoring comparison:'),
+      );
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
