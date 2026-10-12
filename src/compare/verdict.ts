@@ -19,7 +19,7 @@ export function verdictRank(v: string): number {
  */
 export function effectiveVerdict(r: EvalResult): string {
   if (r.verdict.verdict === 'ERROR' || r.error != null) return 'ERROR';
-  if (r.signals.mustNotIncludePresent.length > 0) return 'FAIL';
-  if (r.question.critical && r.signals.mustIncludeMissing.length > 0) return 'FAIL';
+  if ((r.signals?.mustNotIncludePresent?.length ?? 0) > 0) return 'FAIL';
+  if (r.question.critical && (r.signals?.mustIncludeMissing?.length ?? 0) > 0) return 'FAIL';
   return r.verdict.verdict;
 }

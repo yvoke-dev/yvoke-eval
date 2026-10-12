@@ -127,7 +127,7 @@ export async function cmdRun(
   }
 }
 
-function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positionals: string[], contentRoot: string): void {
+export function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positionals: string[], contentRoot: string): void {
   const runArg = (values.run as string | undefined) ?? positionals[1];
   if (!runArg) throw new UserError('compare needs a run: `eval compare --run <run-dir-or-id> [--baseline <dir>] [--gate] [--gate-critical]`');
   const evalDir = resolve(contentRoot, cfg.evalDir ?? './eval');
@@ -143,7 +143,11 @@ function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positional
       const runMeta = JSON.parse(readFileSync(runMetaPath, 'utf8')) as Record<string, unknown>;
       const runScoring = runMeta['scoringVersion'];
       for (const cat of byCat.keys()) {
-        const baseMetaPath = path.join(baselineDir, cat, 'run_meta.json');
+        let baseMetaPath = path.join(baselineDir, cat, 'run_meta.json');
+        if (!existsSync(baseMetaPath)) {
+          const flatMeta = path.join(baselineDir, 'run_meta.json');
+          if (existsSync(flatMeta)) baseMetaPath = flatMeta;
+        }
         if (existsSync(baseMetaPath)) {
           const baseMeta = JSON.parse(readFileSync(baseMetaPath, 'utf8')) as Record<string, unknown>;
           const baseScoring = baseMeta['scoringVersion'];

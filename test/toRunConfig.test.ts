@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import { toRunConfig, normalizeModelName, parseCliArgs, cmdRun } from '../src/cli';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { toRunConfig, normalizeModelName, parseCliArgs, cmdRun, cmdCompare } from '../src/cli';
 import type { EvalConfig } from '../src/config/loadConfig';
 import type { RunSummary } from '../src/run/runSuite';
 
@@ -189,6 +192,84 @@ describe('cmdRun — exit code behavior', () => {
     await cmdRun(cfg(), {}, CONTENT, async () => mockSummary);
     expect(exitSpy).not.toHaveBeenCalled();
     exitSpy.mockRestore();
+  });
+});
+
+describe('cmdCompare', () => {
+  it('warns on scoring version mismatch between run and baseline', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-'));
+    try {
+      const runDir = join(tmp, 'run-1');
+      const baselineDir = join(tmp, 'baseline');
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+      const sampleResult = [
+        {
+          question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+          verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+          signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+          answer: 'test',
+        },
+      ];
+
+      writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(runDir, 'run_meta.json'), JSON.stringify({ scoringVersion: '2.1' }));
+
+      writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(baselineDir, 'basics', 'run_meta.json'), JSON.stringify({ scoringVersion: '2.0' }));
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Scoring version mismatch for basics: run is scored with v2.1 but baseline is v2.0.'),
+      );
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('checks flat baseline run_meta.json when category run_meta does not exist', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-flat-'));
+    try {
+      const runDir = join(tmp, 'run-1');
+      const baselineDir = join(tmp, 'baseline');
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+      const sampleResult = [
+        {
+          question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+          verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+          signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+          answer: 'test',
+        },
+      ];
+
+      writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(runDir, 'run_meta.json'), JSON.stringify({ scoringVersion: '2.1' }));
+
+      writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(baselineDir, 'run_meta.json'), JSON.stringify({ scoringVersion: '1.9' }));
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Scoring version mismatch for basics: run is scored with v2.1 but baseline is v1.9.'),
+      );
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 

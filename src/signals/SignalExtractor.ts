@@ -90,7 +90,7 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
   );
 
   // Cross-reference cited UUIDs against evidence:
-  const UUID_REGEX = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
+  const UUID_REGEX = new RegExp(UUID_HEX, 'g');
   const citedUuids = distinct([...(answer.match(UUID_REGEX) ?? [])].map((u) => u.toLowerCase()));
   let unverifiedCitations: string[] | undefined;
   if (citedUuids.length > 0) {

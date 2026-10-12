@@ -344,5 +344,19 @@ describe('extractSignals — unverifiedCitations', () => {
     );
     expect(s.unverifiedCitations).toEqual([FAKE_UUID]);
   });
+
+  it('detects unverified 32-hex unhyphenated citations', () => {
+    const q = mkQuestion();
+    const hex32 = '0123456789abcdef0123456789abcdef';
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${hex32}], the setting is enabled.`,
+        retrievedChunkIds: [],
+        toolCalls: [],
+      }),
+    );
+    expect(s.unverifiedCitations).toEqual([hex32]);
+  });
 });
 
