@@ -253,7 +253,7 @@ export async function buildOrchestrator(
 
   const resolveDesignated = async (playbookName: string, fallback: string | null): Promise<string | null> => {
     const raw = byName.get(playbookName)?.systemPrompt;
-    return resolvePlaybookSystemPrompt(raw, promptClient, fallback);
+    return (await resolvePlaybookSystemPrompt(raw, promptClient, fallback)).text;
   };
 
   const specialistNames = profile.specialistPlaybooks;

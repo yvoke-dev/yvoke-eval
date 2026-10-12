@@ -135,6 +135,19 @@ web:
 
 If `web.allowedDomains` is omitted or empty, web tool calls fail closed in `canUseTool`, ensuring eval runs only contact approved endpoints matching production policy.
 
+### Run Provenance & Metadata (`run_meta.json`)
+
+Every evaluation run and category writes a `run_meta.json` containing complete provenance of the code, content, models, and prompts used during evaluation:
+
+- `scoringVersion`: Eval scoring and extraction contract version (e.g. `'2.2'`).
+- `harnessGitSha`: Git commit hash of `yvoke-eval` (with `-dirty` suffix if uncommitted modifications or untracked source files exist).
+- `contentGitSha`: Git commit hash of the external content repo (`cfg.evalDir`).
+- `systemPromptSha` and `systemPromptName`: Scalar SHA-256 hash and designated prompt name. Set to `null` when a run or category used multiple prompts.
+- `systemPromptFallback`: Boolean emitted on every run, category metadata, and `playbookPrompts` entry (`true` if any question fell back to `default-chat` because the designated prompt was empty or failed, `false` when nothing fell back).
+- `playbookPrompts`: Map of prompt metadata per playbook (including `_no_playbook`) emitted in multi-playbook runs or mixed categories, used uniformly for both merged and category metadata.
+- `_no_playbook`: Public documented key in `playbookPrompts` representing questions evaluated without a playbook (running under `default-chat`).
+- `systemPromptShas` and `systemPromptVaried`: `systemPromptShas: string[]` and `systemPromptVaried: true` are emitted only when questions within a playbook or suite ran under multiple distinct prompts (when prompts varied).
+
 ### Shell wrappers
 
 `./eval.sh` and `./eval-all.sh` supply `--config` for you. Name your content repo once:

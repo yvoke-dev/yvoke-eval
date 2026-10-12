@@ -481,4 +481,323 @@ describe('cmdCompare', () => {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  describe('metadata warning completeness and varied prompt handling', () => {
+    const sampleResult = [
+      {
+        question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+        verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+        signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+        answer: 'test',
+      },
+    ];
+
+    it('warns when baseline lacks metadata fields (systemPromptSha, graderPromptSha, answerModel)', () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-missing-base-'));
+      try {
+        const runDir = join(tmp, 'run-1');
+        const baselineDir = join(tmp, 'baseline');
+        mkdirSync(runDir, { recursive: true });
+        mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+        writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(runDir, 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptSha: 'sys-run-123',
+            graderPromptSha: 'grader-run-456',
+            answerModel: 'model-run-789',
+          }),
+        );
+
+        writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(join(baselineDir, 'basics', 'run_meta.json'), JSON.stringify({ scoringVersion: '2.1' }));
+
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+        cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] System prompt SHA mismatch for basics: run has sys-run-123 but baseline has none.',
+          ),
+        );
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] Grader prompt SHA mismatch for basics: run has grader-run-456 but baseline has none.',
+          ),
+        );
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] Answer model mismatch for basics: run used model-run-789 but baseline used none.',
+          ),
+        );
+
+        errSpy.mockRestore();
+        logSpy.mockRestore();
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('warns when run lacks metadata fields but baseline has them', () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-missing-run-'));
+      try {
+        const runDir = join(tmp, 'run-1');
+        const baselineDir = join(tmp, 'baseline');
+        mkdirSync(runDir, { recursive: true });
+        mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+        writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(join(runDir, 'run_meta.json'), JSON.stringify({ scoringVersion: '2.1' }));
+
+        writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(baselineDir, 'basics', 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptSha: 'sys-base-123',
+            graderPromptSha: 'grader-base-456',
+            answerModel: 'model-base-789',
+          }),
+        );
+
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+        cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] System prompt SHA mismatch for basics: run has none but baseline has sys-base-123.',
+          ),
+        );
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] Grader prompt SHA mismatch for basics: run has none but baseline has grader-base-456.',
+          ),
+        );
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] Answer model mismatch for basics: run used none but baseline used model-base-789.',
+          ),
+        );
+
+        errSpy.mockRestore();
+        logSpy.mockRestore();
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('warns when metadata fields differ between run and baseline', () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-diff-'));
+      try {
+        const runDir = join(tmp, 'run-1');
+        const baselineDir = join(tmp, 'baseline');
+        mkdirSync(runDir, { recursive: true });
+        mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+        writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(runDir, 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptSha: 'sys-run-1',
+            graderPromptSha: 'grader-run-1',
+            answerModel: 'model-run-1',
+          }),
+        );
+
+        writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(baselineDir, 'basics', 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptSha: 'sys-base-2',
+            graderPromptSha: 'grader-base-2',
+            answerModel: 'model-base-2',
+          }),
+        );
+
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+        cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] System prompt SHA mismatch for basics: run has sys-run-1 but baseline has sys-base-2.',
+          ),
+        );
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] Grader prompt SHA mismatch for basics: run has grader-run-1 but baseline has grader-base-2.',
+          ),
+        );
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] Answer model mismatch for basics: run used model-run-1 but baseline used model-base-2.',
+          ),
+        );
+
+        errSpy.mockRestore();
+        logSpy.mockRestore();
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('warns when run has systemPromptVaried === true and suppresses scalar SHA mismatch warning', () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-run-varied-'));
+      try {
+        const runDir = join(tmp, 'run-1');
+        const baselineDir = join(tmp, 'baseline');
+        mkdirSync(runDir, { recursive: true });
+        mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+        writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(runDir, 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptVaried: true,
+            systemPromptShas: ['sha1', 'sha2'],
+            systemPromptSha: 'sha1',
+          }),
+        );
+
+        writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(baselineDir, 'basics', 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptSha: 'sha3',
+          }),
+        );
+
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+        cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] System prompt varied across questions during basics run (used sha1, sha2).',
+          ),
+        );
+        const calls = errSpy.mock.calls.map(args => String(args[0]));
+        const scalarMismatchWarning = calls.find(msg => msg.includes('[WARN] System prompt SHA mismatch for basics:'));
+        expect(scalarMismatchWarning).toBeUndefined();
+
+        errSpy.mockRestore();
+        logSpy.mockRestore();
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('warns when baseline has systemPromptVaried === true and suppresses scalar SHA mismatch warning', () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-base-varied-'));
+      try {
+        const runDir = join(tmp, 'run-1');
+        const baselineDir = join(tmp, 'baseline');
+        mkdirSync(runDir, { recursive: true });
+        mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+        writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(runDir, 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptSha: 'sha1',
+          }),
+        );
+
+        writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(baselineDir, 'basics', 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptVaried: true,
+            systemPromptShas: ['sha3', 'sha4'],
+            systemPromptSha: 'sha3',
+          }),
+        );
+
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+        cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] System prompt varied across questions during basics baseline (used sha3, sha4).',
+          ),
+        );
+        const calls = errSpy.mock.calls.map(args => String(args[0]));
+        expect(calls.some(msg => msg.includes('used sha1'))).toBe(false);
+        const scalarMismatchWarning = calls.find(msg => msg.includes('[WARN] System prompt SHA mismatch for basics:'));
+        expect(scalarMismatchWarning).toBeUndefined();
+
+        errSpy.mockRestore();
+        logSpy.mockRestore();
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('warns when both run and baseline have systemPromptVaried === true', () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-both-varied-'));
+      try {
+        const runDir = join(tmp, 'run-1');
+        const baselineDir = join(tmp, 'baseline');
+        mkdirSync(runDir, { recursive: true });
+        mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+        writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(runDir, 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptVaried: true,
+            systemPromptShas: ['sha1', 'sha2'],
+            systemPromptSha: 'sha1',
+          }),
+        );
+
+        writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+        writeFileSync(
+          join(baselineDir, 'basics', 'run_meta.json'),
+          JSON.stringify({
+            scoringVersion: '2.1',
+            systemPromptVaried: true,
+            systemPromptShas: ['sha3', 'sha4'],
+            systemPromptSha: 'sha3',
+          }),
+        );
+
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+        cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[WARN] System prompt varied across questions in both runs for basics (run used sha1, sha2, baseline used sha3, sha4).',
+          ),
+        );
+        const calls = errSpy.mock.calls.map(args => String(args[0]));
+        const scalarMismatchWarning = calls.find(msg => msg.includes('[WARN] System prompt SHA mismatch for basics:'));
+        expect(scalarMismatchWarning).toBeUndefined();
+
+        errSpy.mockRestore();
+        logSpy.mockRestore();
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
 });

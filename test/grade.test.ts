@@ -40,11 +40,12 @@ describe('gradeOne', () => {
       },
     };
     const q = mkQuestion({ mustInclude: ['Manager', 'Designer'] });
-    const r = await gradeOne(q, mkBundle({ answer: 'x' }), throwingJudge, 5);
+    const r = await gradeOne(q, mkBundle({ answer: 'x', retrievedChunkIds: ['err-chunk-1'] }), throwingJudge, 5);
     expect(r.verdict.verdict).toBe('ERROR');
     expect(r.error).toContain('judge exploded');
     expect(r.signals.mustIncludeMissing).toEqual([]);
     expect(r.totalTokens).toBe(0);
+    expect(r.retrievedChunkIds).toEqual(['err-chunk-1']);
   });
 
   it('preserves judge ERROR verdict on critical question without overwriting to FAIL', async () => {

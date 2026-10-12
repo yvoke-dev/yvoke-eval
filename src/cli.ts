@@ -156,25 +156,38 @@ export function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, pos
               `[WARN] Scoring version mismatch for ${cat}: run is scored with v${runScoring} but baseline is v${baseScoring}.`,
             );
           }
-          const runSysSha = runMeta['systemPromptSha'];
-          const baseSysSha = baseMeta['systemPromptSha'];
-          if (runSysSha && baseSysSha && runSysSha !== baseSysSha) {
-            console.error(
-              `[WARN] System prompt SHA mismatch for ${cat}: run has ${runSysSha} but baseline has ${baseSysSha}.`,
-            );
+          const runVaried = runMeta['systemPromptVaried'] === true;
+          const baseVaried = baseMeta['systemPromptVaried'] === true;
+          if (runVaried || baseVaried) {
+            const runShas = (runMeta['systemPromptShas'] as string[] | undefined)?.join(', ');
+            const baseShas = (baseMeta['systemPromptShas'] as string[] | undefined)?.join(', ');
+            if (runVaried && baseVaried) {
+              console.error(`[WARN] System prompt varied across questions in both runs for ${cat} (run used ${runShas}, baseline used ${baseShas}).`);
+            } else if (runVaried) {
+              console.error(`[WARN] System prompt varied across questions during ${cat} run (used ${runShas}).`);
+            } else {
+              console.error(`[WARN] System prompt varied across questions during ${cat} baseline (used ${baseShas}).`);
+            }
+          } else {
+            // Scalar comparison strictly in 'else' so varied runs never trigger spurious mismatch warnings:
+            const runSysSha = runMeta['systemPromptSha'];
+            const baseSysSha = baseMeta['systemPromptSha'];
+            if ((runSysSha || baseSysSha) && runSysSha !== baseSysSha) {
+              console.error(`[WARN] System prompt SHA mismatch for ${cat}: run has ${runSysSha ?? 'none'} but baseline has ${baseSysSha ?? 'none'}.`);
+            }
           }
           const runGraderSha = runMeta['graderPromptSha'];
           const baseGraderSha = baseMeta['graderPromptSha'];
-          if (runGraderSha && baseGraderSha && runGraderSha !== baseGraderSha) {
+          if ((runGraderSha || baseGraderSha) && runGraderSha !== baseGraderSha) {
             console.error(
-              `[WARN] Grader prompt SHA mismatch for ${cat}: run has ${runGraderSha} but baseline has ${baseGraderSha}.`,
+              `[WARN] Grader prompt SHA mismatch for ${cat}: run has ${runGraderSha ?? 'none'} but baseline has ${baseGraderSha ?? 'none'}.`,
             );
           }
           const runModel = runMeta['answerModel'];
           const baseModel = baseMeta['answerModel'];
-          if (runModel && baseModel && runModel !== baseModel) {
+          if ((runModel || baseModel) && runModel !== baseModel) {
             console.error(
-              `[WARN] Answer model mismatch for ${cat}: run used ${runModel} but baseline used ${baseModel}.`,
+              `[WARN] Answer model mismatch for ${cat}: run used ${runModel ?? 'none'} but baseline used ${baseModel ?? 'none'}.`,
             );
           }
         } else {

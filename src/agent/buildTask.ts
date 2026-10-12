@@ -10,6 +10,12 @@ export interface BuildTaskOptions {
   systemPromptClient?: SystemPromptClient;
 }
 
+export interface ResolvedSystemPrompt {
+  text: string | null;
+  name: string | null;
+  fallback: boolean;
+}
+
 /**
  * Resolves the system prompt for a playbook.
  * If the playbook designates a custom system prompt name, attempts to load it via SystemPromptClient.
@@ -19,31 +25,46 @@ export async function resolvePlaybookSystemPrompt(
   designatedName: string | undefined | null,
   client?: SystemPromptClient,
   defaultPrompt?: string | null,
-): Promise<string | null> {
+): Promise<ResolvedSystemPrompt> {
   const designated = designatedName?.trim();
   if (designated && client) {
     try {
       const custom = await client.get(designated);
       if (custom && custom.trim().length > 0) {
-        return custom;
+        return { text: custom, name: designated, fallback: false };
       }
     } catch {
       // on resolution error, fall back to default-chat
+    }
+    console.warn(`[WARN] Designated system prompt '${designated}' was empty or not found; fell back to default-chat.`);
+    if (defaultPrompt !== undefined) {
+      return { text: defaultPrompt, name: SYSTEM_PROMPT_NAME, fallback: true };
+    }
+    try {
+      const text = await client.get(SYSTEM_PROMPT_NAME);
+      return { text, name: SYSTEM_PROMPT_NAME, fallback: true };
+    } catch {
+      return { text: null, name: SYSTEM_PROMPT_NAME, fallback: true };
     }
   }
 
   // Fallback to defaultPrompt if explicitly provided (even if null or empty)
   if (defaultPrompt !== undefined) {
-    return defaultPrompt;
+    return {
+      text: defaultPrompt,
+      name: defaultPrompt !== null ? SYSTEM_PROMPT_NAME : null,
+      fallback: false,
+    };
   }
   if (client) {
     try {
-      return await client.get(SYSTEM_PROMPT_NAME);
+      const text = await client.get(SYSTEM_PROMPT_NAME);
+      return { text, name: SYSTEM_PROMPT_NAME, fallback: false };
     } catch {
-      return null;
+      return { text: null, name: null, fallback: false };
     }
   }
-  return null;
+  return { text: null, name: null, fallback: false };
 }
 
 /**
@@ -70,11 +91,12 @@ export async function buildEvalTask(
     template = await prompts.getText(q.playbook);
   }
 
-  const basePrompt = await resolvePlaybookSystemPrompt(
+  const resolved = await resolvePlaybookSystemPrompt(
     designatedSystemPrompt,
     opts.systemPromptClient,
     opts.systemPrompt,
   );
+  const basePrompt = resolved.text;
 
   const hasTemplate = template && template.trim().length > 0;
   const systemPrompt = hasTemplate
@@ -91,5 +113,7 @@ export async function buildEvalTask(
     playbookTools,
     thinkingLevel: opts.thinkingLevel,
     codeExecution,
+    systemPromptName: resolved.name,
+    systemPromptFallback: resolved.fallback,
   };
 }

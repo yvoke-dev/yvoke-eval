@@ -13,7 +13,7 @@ import { SystemPromptClient, SYSTEM_PROMPT_NAME } from '../server/SystemPromptCl
 import { SdkAnswerRunner, type AnswerRunner } from '../agent/SdkAnswerRunner';
 import { MasAnswerRunner } from '../agent/MasAnswerRunner';
 import { buildOrchestrator, type OrchestratorProfile, type OrchestratorTuning } from '../agent/orchestration';
-import { buildEvalTask, resolvePlaybookSystemPrompt } from '../agent/buildTask';
+import { buildEvalTask } from '../agent/buildTask';
 import { gradeOne, gradeOrchestration } from './grade';
 import { ClaudeJudge, type Judge } from '../reviewer/Judge';
 import { ClaudeOrchestrationJudge, type OrchestrationJudge } from '../reviewer/OrchestrationJudge';
@@ -196,6 +196,40 @@ export async function runSuite(
       : `Server has no ${SYSTEM_PROMPT_NAME} system prompt — running with the SDK default.`,
   );
 
+  interface PromptEntry {
+    names: Set<string>;
+    shas: Set<string>;
+    fallback: boolean;
+  }
+
+  function formatPromptEntry(entry?: PromptEntry) {
+    if (!entry || (entry.names.size === 0 && entry.shas.size === 0)) {
+      return {
+        systemPromptName: null,
+        systemPromptSha: null,
+        systemPromptFallback: false,
+      };
+    }
+    const isVaried = entry.names.size > 1 || entry.shas.size > 1;
+    if (isVaried) {
+      return {
+        systemPromptName: null,
+        systemPromptSha: null,
+        systemPromptFallback: entry.fallback,
+        systemPromptShas: [...entry.shas],
+        systemPromptVaried: true as const,
+      };
+    }
+    return {
+      systemPromptName: [...entry.names][0] ?? null,
+      systemPromptSha: [...entry.shas][0] ?? null,
+      systemPromptFallback: entry.fallback,
+    };
+  }
+
+  const categoryPrompts = new Map<string, PromptEntry>(); // keyed by `${q.category}::${pbKey}`
+  const mergedPlaybookPrompts = new Map<string, PromptEntry>(); // keyed by pbKey
+
   // Build the answer producer for the selected mode.
   let produce: (q: EvalQuestion, ac: AbortController) => Promise<AnswerBundle>;
   let answerModelLabel: string;
@@ -230,6 +264,20 @@ export async function runSuite(
         systemPromptClient,
       });
       task.abortController = ac;
+
+      const pbKey = q.playbook ?? '_no_playbook';
+      const catKey = `${q.category}::${pbKey}`;
+      for (const [map, key] of [[categoryPrompts, catKey], [mergedPlaybookPrompts, pbKey]] as const) {
+        let entry = map.get(key);
+        if (!entry) {
+          entry = { names: new Set(), shas: new Set(), fallback: false };
+          map.set(key, entry);
+        }
+        if (task.systemPromptName) entry.names.add(task.systemPromptName);
+        if (task.systemPrompt) entry.shas.add(sha256(task.systemPrompt));
+        if (task.systemPromptFallback) entry.fallback = true;
+      }
+
       return runner.run(task);
     };
     answerModelLabel = cfg.answerModel;
@@ -292,30 +340,46 @@ export async function runSuite(
   const activeJudge = orchestrationMode ? orchJudge : judge;
   const resolvedJudgeModel = activeJudge?.resolvedModel ?? (judge as { resolvedModel?: string })?.resolvedModel;
 
-  const promptList = await prompts.list().catch(() => []);
-  const promptInfoMap = new Map(promptList.map((p) => [p.name, p]));
   const allPlaybooks = [...new Set(results.map((r) => r.question.playbook).filter((p): p is string => Boolean(p)))];
-  const firstPlaybookInfo = allPlaybooks.length > 0 ? promptInfoMap.get(allPlaybooks[0]) : undefined;
-  const mergedBasePrompt =
-    allPlaybooks.length === 1
-      ? await resolvePlaybookSystemPrompt(firstPlaybookInfo?.systemPrompt, systemPromptClient, systemPrompt)
-      : systemPrompt;
-  let mergedSysPromptText = mergedBasePrompt ?? '';
-  if (allPlaybooks.length === 1) {
-    try {
-      const pbText = await prompts.getText(allPlaybooks[0]);
-      mergedSysPromptText = mergedSysPromptText ? `${mergedSysPromptText}\n\n---\n\n${pbText}` : pbText;
-    } catch {
-      // ignore
-    }
+
+  let rootPromptMeta: {
+    systemPromptName: string | null;
+    systemPromptSha: string | null;
+    systemPromptFallback: boolean;
+    systemPromptShas?: string[];
+    systemPromptVaried?: boolean;
+    playbookPrompts: Record<string, unknown> | null;
+  };
+
+  if (mergedPlaybookPrompts.size === 0) {
+    // MAS mode
+    rootPromptMeta = {
+      systemPromptName: null,
+      systemPromptSha: null,
+      systemPromptFallback: false,
+      playbookPrompts: null,
+    };
+  } else if (mergedPlaybookPrompts.size === 1) {
+    const singleEntry = [...mergedPlaybookPrompts.values()][0];
+    const formatted = formatPromptEntry(singleEntry);
+    rootPromptMeta = {
+      systemPromptName: formatted.systemPromptName,
+      systemPromptSha: formatted.systemPromptSha,
+      systemPromptFallback: formatted.systemPromptFallback,
+      ...(formatted.systemPromptVaried ? { systemPromptVaried: true, systemPromptShas: formatted.systemPromptShas } : {}),
+      playbookPrompts: null,
+    };
+  } else {
+    // mergedPlaybookPrompts.size > 1
+    rootPromptMeta = {
+      systemPromptName: null,
+      systemPromptSha: null,
+      systemPromptFallback: [...mergedPlaybookPrompts.values()].some((e) => e.fallback),
+      playbookPrompts: Object.fromEntries(
+        [...mergedPlaybookPrompts.entries()].map(([pb, e]) => [pb, formatPromptEntry(e)]),
+      ),
+    };
   }
-  const baseSysPromptSha = mergedSysPromptText
-    ? sha256(mergedSysPromptText)
-    : (systemPrompt ? sha256(systemPrompt) : null);
-  const baseSysPromptName =
-    allPlaybooks.length === 1 && firstPlaybookInfo?.systemPrompt
-      ? firstPlaybookInfo.systemPrompt
-      : (systemPrompt ? SYSTEM_PROMPT_NAME : null);
 
   const meta = {
     answerModel: answerModelLabel,
@@ -332,10 +396,10 @@ export async function runSuite(
     resolvedReviewerModel: resolvedJudgeModel ?? null,
     reviewerProvider: 'claude',
     thinkingLevel: thinkingLabel,
-    systemPromptName: baseSysPromptName,
-    systemPromptSha: baseSysPromptSha,
+    ...rootPromptMeta,
     graderPromptSha: grader.sha,
     gitSha: sutSha,
+    playbooks: allPlaybooks,
     masReviewerModel:
       cfg.mode === 'mas'
         ? (cfg.mas?.tuning.reviewer.configuredModel ?? cfg.mas?.tuning.reviewer.model ?? null)
@@ -353,33 +417,62 @@ export async function runSuite(
   } else {
     for (const [cat, list] of groupByCategory(results)) {
       const runId = `${newRunId(answerModelLabel, sutSha)}__${cat}`;
-      const catPlaybooks = [...new Set(list.map((r) => r.question.playbook).filter((p): p is string => Boolean(p)))];
-      const playbookInfo = catPlaybooks.length > 0 ? promptInfoMap.get(catPlaybooks[0]) : undefined;
-      const catSysPrompt =
-        playbookInfo?.systemPrompt
-          ? playbookInfo.systemPrompt
-          : (systemPrompt ? SYSTEM_PROMPT_NAME : null);
-      const catBasePrompt = await resolvePlaybookSystemPrompt(
-        playbookInfo?.systemPrompt,
-        systemPromptClient,
-        systemPrompt,
-      );
-      let catSysPromptText = catBasePrompt ?? '';
-      if (catPlaybooks.length > 0) {
-        try {
-          const playbookText = await prompts.getText(catPlaybooks[0]);
-          catSysPromptText = catSysPromptText ? `${catSysPromptText}\n\n---\n\n${playbookText}` : playbookText;
-        } catch {
-          // ignore
+      const distinctKeys = [...new Set(list.map((r) => r.question.playbook ?? '_no_playbook'))];
+      let catPlaybooks: string[];
+      let catPromptMeta: {
+        systemPromptName: string | null;
+        systemPromptSha: string | null;
+        systemPromptFallback: boolean;
+        systemPromptShas?: string[];
+        systemPromptVaried?: boolean;
+        playbookPrompts?: Record<string, unknown> | null;
+      };
+
+      if (distinctKeys.length === 1) {
+        const k = distinctKeys[0];
+        const isNoPb = k === '_no_playbook';
+        catPlaybooks = isNoPb ? [] : [k];
+        const entry = categoryPrompts.get(`${cat}::${k}`);
+        if (!entry) {
+          // MAS mode where categoryPrompts wasn't populated
+          catPromptMeta = {
+            systemPromptName: null,
+            systemPromptSha: null,
+            systemPromptFallback: false,
+            playbookPrompts: null,
+          };
+        } else {
+          const formatted = formatPromptEntry(entry);
+          catPromptMeta = {
+            systemPromptName: formatted.systemPromptName,
+            systemPromptSha: formatted.systemPromptSha,
+            systemPromptFallback: formatted.systemPromptFallback,
+            ...(formatted.systemPromptVaried ? { systemPromptVaried: true, systemPromptShas: formatted.systemPromptShas } : {}),
+            playbookPrompts: null,
+          };
         }
+      } else {
+        // Multi-playbook or mixed category!
+        catPlaybooks = distinctKeys.filter((k) => k !== '_no_playbook');
+        catPromptMeta = {
+          systemPromptName: null,
+          systemPromptSha: null,
+          systemPromptFallback: distinctKeys.some((k) => categoryPrompts.get(`${cat}::${k}`)?.fallback ?? false),
+          playbookPrompts: Object.fromEntries(
+            distinctKeys.map((k) => [k, formatPromptEntry(categoryPrompts.get(`${cat}::${k}`))]),
+          ),
+        };
       }
-      const catSysPromptSha = catSysPromptText ? sha256(catSysPromptText) : baseSysPromptSha;
+
       const catMeta = {
         ...meta,
-        systemPromptName: catSysPrompt,
-        systemPromptSha: catSysPromptSha,
+        ...catPromptMeta,
         playbooks: catPlaybooks,
       };
+      if (!catPromptMeta.systemPromptVaried) {
+        delete (catMeta as any).systemPromptVaried;
+        delete (catMeta as any).systemPromptShas;
+      }
       runDirs.push(writer.write(cfg.evalDir, catMeta, list, runId).runDir);
     }
   }

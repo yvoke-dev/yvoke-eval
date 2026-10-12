@@ -603,6 +603,55 @@ describe('extractSignals — unverifiedCitations', () => {
       extractSignals(q, mkBundle({ answer: 'It is not SAPR3; the true connector is SAP.' })).mustIncludeMissing,
     ).toEqual([]);
   });
+
+  describe('Phase 4: Matcher Boundary, Plural Pinning & C# Negative Tests', () => {
+    it('does not match C# when only C is present in text (negative tests)', () => {
+      const q = mkQuestion({ mustInclude: ['C#'] });
+      expect(extractSignals(q, mkBundle({ answer: 'Programming in C and .NET' })).mustIncludeMissing).toEqual(['C#']);
+      expect(extractSignals(q, mkBundle({ answer: 'Vitamin C is found in citrus' })).mustIncludeMissing).toEqual(['C#']);
+    });
+
+    it('does not match F# when only F is present in text (negative test)', () => {
+      const q = mkQuestion({ mustInclude: ['F#'] });
+      expect(extractSignals(q, mkBundle({ answer: 'Use Option F for the form' })).mustIncludeMissing).toEqual(['F#']);
+    });
+
+    it('matches C# when C# is present in text (positive test)', () => {
+      const q = mkQuestion({ mustInclude: ['C#'] });
+      expect(extractSignals(q, mkBundle({ answer: 'Programming in C# and .NET' })).mustIncludeMissing).toEqual([]);
+    });
+
+    it('does not match SAP against SAPS4 in plural boundary check', () => {
+      const q = mkQuestion({ mustInclude: ['SAP'] });
+      expect(extractSignals(q, mkBundle({ answer: 'The system is SAPS4 in this deployment' })).mustIncludeMissing).toEqual(['SAP']);
+    });
+
+    it('matches internal underscore markdown stripping (One _Identity_ Manager matches One Identity Manager)', () => {
+      const q = mkQuestion({ mustInclude: ['One Identity Manager'] });
+      expect(extractSignals(q, mkBundle({ answer: 'Welcome to One _Identity_ Manager docs.' })).mustIncludeMissing).toEqual([]);
+    });
+
+    it('matches internal asterisk markdown stripping (One *Identity* Manager and **SAP** R/3)', () => {
+      const q1 = mkQuestion({ mustInclude: ['One Identity Manager'] });
+      expect(extractSignals(q1, mkBundle({ answer: 'Welcome to One *Identity* Manager docs.' })).mustIncludeMissing).toEqual([]);
+
+      const q2 = mkQuestion({ mustInclude: ['SAP R/3'] });
+      expect(extractSignals(q2, mkBundle({ answer: 'Connector for **SAP** R/3 system.' })).mustIncludeMissing).toEqual([]);
+    });
+
+    it('enforces word boundary collisions in must_include_any (connector is SAP against SAPR3)', () => {
+      const q = mkQuestion({
+        mustIncludeAny: [['connector is SAP', 'SAP R/3 User Management Module']],
+      });
+      // "The connector is SAPR3." should NOT match "connector is SAP"
+      expect(extractSignals(q, mkBundle({ answer: 'The connector is SAPR3.' })).mustIncludeMissing).toEqual([
+        'connector is SAP | SAP R/3 User Management Module',
+      ]);
+      // "The connector is SAP." should match
+      expect(extractSignals(q, mkBundle({ answer: 'The connector is SAP.' })).mustIncludeMissing).toEqual([]);
+    });
+  });
 });
+
 
 

@@ -22,6 +22,7 @@ import { ClaudeJudge } from '../src/reviewer/Judge';
 import { AgentSdkStructuredModel } from '../src/reviewer/AgentSdkStructuredModel';
 import { loadGrader } from '../src/reviewer/loadGrader';
 import { loadConfig, resolveSuite } from '../src/config/loadConfig';
+import { MAX_RESULT_CHARS } from '../src/reviewer/toolEvidence';
 import type { EvalResult } from '../src/types';
 
 function collect(re: RegExp, text: string, into: Set<string>): void {
@@ -103,6 +104,65 @@ function loadSessions(transcripts: string): Map<string, StreamMessage[]> {
     if (!prev || mtime > prev.mtime) best.set(q, { mtime, messages });
   }
   return new Map([...best].map(([k, v]) => [k, v.messages]));
+}
+
+export interface OldResultLike {
+  answer?: string | null;
+  rawAnswer?: string | null;
+  toolEvidence?: Array<{ name: string; argumentsJson: string; resultText?: string }>;
+  retrievedChunkIds?: string[];
+  signals?: { unverifiedCitations?: string[] };
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+}
+
+export function buildReplayBundle(o: OldResultLike): { bundle: AnswerBundle; evidenceTruncated: boolean } {
+  let chunkIds: string[];
+  let evidenceTruncated = false;
+  if (Array.isArray(o.retrievedChunkIds)) {
+    chunkIds = o.retrievedChunkIds;
+  } else {
+    const idSet = new Set<string>();
+    for (const e of o.toolEvidence ?? []) {
+      if (e.resultText) {
+        if (e.resultText.length >= MAX_RESULT_CHARS || e.resultText.includes('[…truncated')) {
+          evidenceTruncated = true;
+        }
+        collect(/\[chunk_id=([0-9a-fA-F-]{8,})\]/g, e.resultText, idSet);
+        collect(/\bid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g, e.resultText, idSet);
+      }
+    }
+    chunkIds = [...idSet];
+  }
+  const bundle: AnswerBundle = {
+    answer: o.answer ?? '',
+    rawAnswer: o.rawAnswer ?? undefined,
+    toolCalls: (o.toolEvidence ?? []).map((e) => ({
+      name: e.name,
+      argumentsJson: e.argumentsJson,
+      resultText: e.resultText,
+    })),
+    retrievedChunkIds: chunkIds,
+    promptTokens: o.promptTokens ?? 0,
+    completionTokens: o.completionTokens ?? 0,
+    totalTokens: o.totalTokens ?? 0,
+    providerMeta: o.costUsd != null ? { costUsd: o.costUsd } : {},
+  };
+  return { bundle, evidenceTruncated };
+}
+
+export function adjustReplaySignals(
+  signals: ReturnType<typeof extractSignals>,
+  o: OldResultLike,
+  evidenceTruncated: boolean,
+): void {
+  if (Array.isArray(o.retrievedChunkIds)) {
+    signals.unverifiedCitations = o.signals?.unverifiedCitations;
+  } else if (evidenceTruncated && signals.unverifiedCitations && signals.unverifiedCitations.length > 0) {
+    signals.unverifiedCitations = undefined;
+  }
 }
 
 const USAGE = 'usage: tsx scripts/replay.ts --config <eval-repo>/yvoke-eval.yaml <old-run-dir> [outfile.json]';
@@ -203,42 +263,9 @@ async function main(): Promise<void> {
 
     let res: EvalResult;
     if (o && o.toolEvidence != null && o.answer != null) {
-      let chunkIds: string[];
-      let evidenceTruncated = false;
-      if (Array.isArray(o.retrievedChunkIds) && o.retrievedChunkIds.length > 0) {
-        chunkIds = o.retrievedChunkIds;
-      } else {
-        const idSet = new Set<string>();
-        for (const e of o.toolEvidence) {
-          if (e.resultText) {
-            if (e.resultText.length >= 20_000) {
-              evidenceTruncated = true;
-            }
-            collect(/\[chunk_id=([0-9a-fA-F-]{8,})\]/g, e.resultText, idSet);
-            collect(/\bid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g, e.resultText, idSet);
-          }
-        }
-        chunkIds = [...idSet];
-      }
-      const syntheticBundle: AnswerBundle = {
-        answer: o.answer,
-        rawAnswer: o.rawAnswer ?? undefined,
-        toolCalls: o.toolEvidence.map((e) => ({
-          name: e.name,
-          argumentsJson: e.argumentsJson,
-          resultText: e.resultText,
-        })),
-        retrievedChunkIds: chunkIds,
-        promptTokens: o.promptTokens,
-        completionTokens: o.completionTokens,
-        totalTokens: o.totalTokens,
-        providerMeta: o.costUsd != null ? { costUsd: o.costUsd } : {},
-      };
+      const { bundle: syntheticBundle, evidenceTruncated } = buildReplayBundle(o);
       const signals = extractSignals(q, syntheticBundle);
-      if (evidenceTruncated && signals.unverifiedCitations && signals.unverifiedCitations.length > 0) {
-        // Truncated tool evidence in legacy run missing full chunk list: do not falsely fail citations
-        signals.unverifiedCitations = undefined;
-      }
+      adjustReplaySignals(signals, o, evidenceTruncated);
       const evidence = o.toolEvidence;
       const verdict = await judge.review({ question: q, answer: o.answer, signals, evidence });
       const isJudgeError = verdict.verdict === 'ERROR';
@@ -287,4 +314,22 @@ async function main(): Promise<void> {
   console.error(`\nreplayed ${out.length}/${targetQuestions.length}; graderSha=${grader.sha}; out=${outFile}`);
 }
 
-void main();
+function isEntryPoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  const self = fileURLToPath(import.meta.url);
+  const invoked = path.resolve(argv1);
+  if (invoked === self) return true;
+  try {
+    return realpathSync(invoked) === realpathSync(self);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  });
+}

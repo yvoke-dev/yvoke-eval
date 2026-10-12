@@ -182,7 +182,7 @@ export function normalizeText(text: string): string {
 }
 
 function stripMarkdown(text: string): string {
-  return text.replace(/[*_`#]/g, '');
+  return text.replace(/[*_`]/g, '');
 }
 
 function isAlphaNumeric(ch: string): boolean {

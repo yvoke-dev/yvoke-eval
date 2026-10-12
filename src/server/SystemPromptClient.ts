@@ -85,7 +85,9 @@ export class SystemPromptClient {
     }
 
     const result = prompt.trim() ? prompt : null;
-    this.cache.set(name, result);
+    if (result !== null) {
+      this.cache.set(name, result);
+    }
     return result;
   }
 }
