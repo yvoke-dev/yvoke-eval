@@ -1,6 +1,7 @@
 import { mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { UserError, type EvalQuestion, type EvalResult, type ThinkingLevel } from '../types';
@@ -291,6 +292,7 @@ export async function runSuite(
   const activeJudge = orchestrationMode ? orchJudge : judge;
   const resolvedJudgeModel = activeJudge?.resolvedModel ?? (judge as { resolvedModel?: string })?.resolvedModel;
 
+  const baseSysPromptSha = systemPrompt ? sha256(systemPrompt) : null;
   const meta = {
     answerModel: answerModelLabel,
     resolvedAnswerModel: resolvedWorkerModel ?? null,
@@ -307,6 +309,7 @@ export async function runSuite(
     reviewerProvider: 'claude',
     thinkingLevel: thinkingLabel,
     systemPromptName: systemPrompt ? SYSTEM_PROMPT_NAME : null,
+    systemPromptSha: baseSysPromptSha,
     graderPromptSha: grader.sha,
     gitSha: sutSha,
     masReviewerModel:
@@ -329,11 +332,27 @@ export async function runSuite(
     for (const [cat, list] of groupByCategory(results)) {
       const runId = `${newRunId(answerModelLabel, sutSha)}__${cat}`;
       const catPlaybooks = [...new Set(list.map((r) => r.question.playbook).filter((p): p is string => Boolean(p)))];
+      const playbookInfo = catPlaybooks.length > 0 ? promptInfoMap.get(catPlaybooks[0]) : undefined;
       const catSysPrompt =
-        catPlaybooks.length > 0 && promptInfoMap.get(catPlaybooks[0])?.systemPrompt
-          ? promptInfoMap.get(catPlaybooks[0])!.systemPrompt!
+        playbookInfo?.systemPrompt
+          ? playbookInfo.systemPrompt
           : (systemPrompt ? SYSTEM_PROMPT_NAME : null);
-      const catMeta = { ...meta, systemPromptName: catSysPrompt, playbooks: catPlaybooks };
+      let catSysPromptText = systemPrompt ?? '';
+      if (catPlaybooks.length > 0) {
+        try {
+          const playbookText = await prompts.getText(catPlaybooks[0]);
+          catSysPromptText = catSysPromptText ? `${catSysPromptText}\n\n---\n\n${playbookText}` : playbookText;
+        } catch {
+          // ignore
+        }
+      }
+      const catSysPromptSha = catSysPromptText ? sha256(catSysPromptText) : baseSysPromptSha;
+      const catMeta = {
+        ...meta,
+        systemPromptName: catSysPrompt,
+        systemPromptSha: catSysPromptSha,
+        playbooks: catPlaybooks,
+      };
       runDirs.push(writer.write(cfg.evalDir, catMeta, list, runId).runDir);
     }
   }
@@ -449,15 +468,25 @@ export function harnessGitSha(repoRoot = fileURLToPath(new URL('../..', import.m
   }
 }
 
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
 export function gitShaForDir(dir: string): string | null {
   try {
-    const sha = execSync('git rev-parse --short HEAD', { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] })
+    const repoRoot = execSync('git rev-parse --show-toplevel', { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()
       .trim();
-    const status = execSync("git status --porcelain -- . ':!eval/runs' ':!eval/runs/**' ':!runs' ':!runs/**'", {
-      cwd: dir,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
+    const sha = execSync('git rev-parse --short HEAD', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+    const status = execSync(
+      "git status --porcelain -- ':!eval/runs' ':!eval/runs/**' ':!runs' ':!runs/**'",
+      {
+        cwd: repoRoot,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    )
       .toString()
       .trim();
     return status.length > 0 ? `${sha}-dirty` : sha;

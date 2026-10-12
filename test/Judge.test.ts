@@ -102,6 +102,18 @@ describe('buildUserMessage', () => {
   it('shows a placeholder for an empty answer', () => {
     expect(buildUserMessage(mkQuestion(), '', SIGNALS)).toContain('(no answer produced)');
   });
+
+  it('surfaces unverified_citations only when present in signals', () => {
+    const q = mkQuestion();
+    const withUnverified = buildUserMessage(q, 'answer', {
+      ...SIGNALS,
+      unverifiedCitations: ['11111111-1111-1111-1111-111111111111'],
+    });
+    expect(withUnverified).toContain('unverified_citations: [11111111-1111-1111-1111-111111111111]');
+
+    const withoutUnverified = buildUserMessage(q, 'answer', SIGNALS);
+    expect(withoutUnverified).not.toContain('unverified_citations');
+  });
 });
 
 describe('ClaudeJudge', () => {

@@ -76,17 +76,16 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
             .filter(isString),
         );
 
-  const normHay = normalizeHaystack(answer);
-  const mustIncludeMissing = question.mustInclude.filter((s) => !normHay.includes(normalizeNeedle(s)));
+  const mustIncludeMissing = question.mustInclude.filter((s) => !containsNeedle(answer, s));
   if (question.mustIncludeAny && question.mustIncludeAny.length > 0) {
     for (const group of question.mustIncludeAny) {
-      const match = group.some((s) => normHay.includes(normalizeNeedle(s)));
+      const match = group.some((s) => containsNeedle(answer, s));
       if (!match) {
         mustIncludeMissing.push(group.join(' | '));
       }
     }
   }
-  const mustNotIncludePresent = question.mustNotInclude.filter((s) => normHay.includes(normalizeNeedle(s)));
+  const mustNotIncludePresent = question.mustNotInclude.filter((s) => containsNeedle(answer, s));
   const hasCitations = CITATION.test(answer) || answer.includes('## References');
   // Compared on the bare name, because the trace is stripped of the server prefix while a spec
   // names tools the way a playbook does.
@@ -181,3 +180,48 @@ export function normalizeNeedle(needle: string): string {
 export function normalizeText(text: string): string {
   return normalizeNeedle(text);
 }
+
+function stripMarkdown(text: string): string {
+  return text.replace(/[*_`#]/g, '');
+}
+
+function isAlphaNumeric(ch: string): boolean {
+  return /[a-z0-9]/.test(ch);
+}
+
+function checkNeedleInText(haystack: string, needle: string): boolean {
+  if (!needle) return true;
+  let idx = haystack.indexOf(needle);
+  if (idx === -1) return false;
+
+  const needleStartsAlpha = isAlphaNumeric(needle[0]);
+  const needleEndsAlpha = isAlphaNumeric(needle[needle.length - 1]);
+
+  while (idx !== -1) {
+    const charBefore = idx > 0 ? haystack[idx - 1] : '';
+    const charAfter = idx + needle.length < haystack.length ? haystack[idx + needle.length] : '';
+
+    const validBefore = !needleStartsAlpha || !isAlphaNumeric(charBefore);
+    const validAfter = !needleEndsAlpha || !isAlphaNumeric(charAfter);
+
+    if (validBefore && validAfter) {
+      return true;
+    }
+    idx = haystack.indexOf(needle, idx + 1);
+  }
+
+  return false;
+}
+
+export function containsNeedle(haystack: string, needle: string): boolean {
+  if (checkNeedleInText(normalizeHaystack(haystack), normalizeNeedle(needle))) {
+    return true;
+  }
+  const strippedHay = normalizeHaystack(stripMarkdown(haystack));
+  const strippedNeedle = normalizeNeedle(stripMarkdown(needle));
+  if (strippedNeedle.length > 0 && checkNeedleInText(strippedHay, strippedNeedle)) {
+    return true;
+  }
+  return false;
+}
+

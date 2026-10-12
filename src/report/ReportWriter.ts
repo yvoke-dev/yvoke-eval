@@ -196,7 +196,10 @@ export function renderCategoryReport(category: string, results: EvalResult[]): s
     sb += `## ${r.question.id} — ${r.question.question}\n\n`;
     sb += `**Verdict:** ${r.verdict.verdict}  ${JSON.stringify(r.verdict.dimensions)}\n\n`;
     sb += `**Reasoning:** ${r.verdict.reasoning}\n\n`;
-    sb += `**Signals:** tools=${JSON.stringify(r.signals.toolsFired)} retrievedCollections=${JSON.stringify(r.signals.retrievedCollections)} citations=${r.signals.hasCitations}\n\n`;
+    const unverifiedStr = r.signals.unverifiedCitations?.length
+      ? ` unverifiedCitations=${JSON.stringify(r.signals.unverifiedCitations)}`
+      : '';
+    sb += `**Signals:** tools=${JSON.stringify(r.signals.toolsFired)} retrievedCollections=${JSON.stringify(r.signals.retrievedCollections)} citations=${r.signals.hasCitations}${unverifiedStr}\n\n`;
     if (r.error) {
       sb += `**Run error:** ${r.error}\n\n`;
     }

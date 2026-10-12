@@ -444,4 +444,73 @@ describe('extractSignals — unverifiedCitations', () => {
     );
     expect(s.unverifiedCitations).toBeUndefined();
   });
+
+  it('normalizes hyphenated UUIDs found in tool resultText against unhyphenated answer citations', () => {
+    const q = mkQuestion();
+    const toolHyphenLower = '12345678-abcd-ef01-2345-6789abcdef01';
+    const answerUnhyphenUpper = '12345678ABCDEF0123456789ABCDEF01';
+    const s = extractSignals(
+      q,
+      mkBundle({
+        answer: `According to [${answerUnhyphenUpper}], the setting is enabled.`,
+        retrievedChunkIds: [],
+        toolCalls: [
+          {
+            name: 'get_section',
+            argumentsJson: `{"chunk_id":"${toolHyphenLower}"}`,
+            resultText: `Found section in chunk ${toolHyphenLower}`,
+            isError: false,
+          },
+        ],
+      }),
+    );
+    expect(s.unverifiedCitations).toBeUndefined();
+  });
+
+  it('respects word boundaries when evaluating must_include needles to prevent substring matching across alphanumeric boundaries', () => {
+    const q = mkQuestion({
+      mustInclude: ['connector is SAP'],
+    });
+    // Answer contains "connector is SAPR3" — SAP should NOT match SAPR3
+    const s1 = extractSignals(
+      q,
+      mkBundle({
+        answer: 'Yes. The connector is SAPR3 and its canonical identifier is connector:SAPR3-0001.',
+      }),
+    );
+    expect(s1.mustIncludeMissing).toEqual(['connector is SAP']);
+
+    // Answer contains "The connector is SAP." — should match
+    const s2 = extractSignals(
+      q,
+      mkBundle({
+        answer: 'In One Identity Manager, the connector is SAP.',
+      }),
+    );
+    expect(s2.mustIncludeMissing).toEqual([]);
+  });
+
+  it('normalizes markdown formatting (bold, backticks) when matching must_include needles', () => {
+    const q = mkQuestion({
+      mustInclude: ['connector is SAP'],
+    });
+    // Answer contains bold markdown: "connector is **SAP**"
+    const s1 = extractSignals(
+      q,
+      mkBundle({
+        answer: 'The connector is **SAP** in 9.3.1.',
+      }),
+    );
+    expect(s1.mustIncludeMissing).toEqual([]);
+
+    // Answer contains code backticks: "connector is `SAP`"
+    const s2 = extractSignals(
+      q,
+      mkBundle({
+        answer: 'The connector is `SAP` in 9.3.1.',
+      }),
+    );
+    expect(s2.mustIncludeMissing).toEqual([]);
+  });
 });
+
