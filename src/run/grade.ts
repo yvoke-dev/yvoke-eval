@@ -44,7 +44,7 @@ export async function gradeOne(
         searchCollections: [],
         retrievedCollections: [],
         retrievedChunkCount: 0,
-        mustIncludeMissing: question.mustInclude,
+        mustIncludeMissing: [],
         mustNotIncludePresent: [],
         expectedToolsMissing: [],
         hasCitations: false,

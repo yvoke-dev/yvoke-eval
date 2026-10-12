@@ -274,7 +274,7 @@ function errorResult(q: EvalQuestion, msg: string, latencyMs: number): EvalResul
       searchCollections: [],
       retrievedCollections: [],
       retrievedChunkCount: 0,
-      mustIncludeMissing: q.mustInclude,
+      mustIncludeMissing: [],
       mustNotIncludePresent: [],
       expectedToolsMissing: [],
       hasCitations: false,

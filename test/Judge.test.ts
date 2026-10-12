@@ -83,6 +83,7 @@ describe('buildUserMessage', () => {
     const q = mkQuestion({ bait: null, rubric: 'must name the clients' });
     const msg = buildUserMessage(q, 'Manager, Designer [1]', SIGNALS);
     expect(msg).toContain('expected_collection_contains: Getting Started');
+    expect(msg).toContain('critical: false');
     expect(msg).toContain('rubric: must name the clients');
     expect(msg).toContain('tools_fired: [search_corpus]');
     expect(msg).toContain('answer_has_citations: true');

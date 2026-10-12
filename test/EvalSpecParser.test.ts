@@ -79,6 +79,26 @@ describe('EvalSpecParser', () => {
     expect(() => new EvalSpecParser(dir, ['demo-advanced']).parse()).toThrow(/not a known specialist/);
     expect(() => new EvalSpecParser(dir, ['demo-basics']).parse()).not.toThrow();
   });
+
+  it('parses must_include_any disjunctions (nested array syntax)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'yvoke-eval-any-'));
+    writeFileSync(
+      join(dir, 'eval_specs.yaml'),
+      [
+        'cat:',
+        '  Q1:',
+        '    must_include_any:',
+        '      - [EMC CIFS, CIFS]',
+        '      - [SharePoint farm, SharePoint]',
+      ].join('\n'),
+    );
+    writeFileSync(join(dir, 'eval_cat.md'), ['## Q1 — Test Question'].join('\n'));
+    const qs = new EvalSpecParser(dir).parse();
+    expect(qs[0].mustIncludeAny).toEqual([
+      ['EMC CIFS', 'CIFS'],
+      ['SharePoint farm', 'SharePoint'],
+    ]);
+  });
 });
 
 /** Writes a minimal isolated eval dir (category "orch": Q1 opt-in, Q2 plain) to a temp path. */

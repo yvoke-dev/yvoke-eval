@@ -55,6 +55,26 @@ describe('extractSignals', () => {
     expect(s.mustIncludeMissing).toEqual(['AttestationPolicy']);
   });
 
+  it('normalizes whitespace and backslashes in must_include and answer', () => {
+    const q = mkQuestion({ mustInclude: ['Password Capture Agent\\Driver'] });
+    const s = extractSignals(q, mkBundle({ answer: 'Check Password   Capture  Agent/Driver in HKLM' }));
+    expect(s.mustIncludeMissing).toEqual([]);
+  });
+
+  it('evaluates mustIncludeAny disjunctions: passes if any alternative matches', () => {
+    const q = mkQuestion({
+      mustInclude: ['DialogTable'],
+      mustIncludeAny: [['EMC CIFS', 'CIFS']],
+    });
+    // Matches "CIFS" alternative
+    const s1 = extractSignals(q, mkBundle({ answer: 'Uses DialogTable and a storage device with CIFS enabled' }));
+    expect(s1.mustIncludeMissing).toEqual([]);
+
+    // Misses both alternatives
+    const s2 = extractSignals(q, mkBundle({ answer: 'Uses DialogTable and an NFS share' }));
+    expect(s2.mustIncludeMissing).toEqual(['EMC CIFS | CIFS']);
+  });
+
   it('flags must_not_include (fabrication bait) that appears', () => {
     const q = mkQuestion({ mustNotInclude: ['SchemaWizard.exe'] });
     const s = extractSignals(q, mkBundle({ answer: 'Use SCHEMAWIZARD.EXE to do X' }));
@@ -188,5 +208,34 @@ describe('extractSignals — expected tools', () => {
 
   it('is empty when the spec asks for nothing', () => {
     expect(extractSignals(mkQuestion(), mkBundle({})).expectedToolsMissing).toEqual([]);
+  });
+});
+
+describe('extractSignals — whitespace and needle boundary handling', () => {
+  it('does not trim needle with intentional trailing space (e.g. "Dim " must not match "dimension")', () => {
+    const q = { ...mkQuestion(), mustNotInclude: ['Dim '] };
+    const s = extractSignals(
+      q,
+      mkBundle({ answer: 'The script reads the dimension of the config parameter.' }),
+    );
+    expect(s.mustNotIncludePresent).toEqual([]);
+  });
+
+  it('matches needle with intentional trailing space when the token is genuinely present', () => {
+    const q = { ...mkQuestion(), mustNotInclude: ['Dim '] };
+    const s = extractSignals(
+      q,
+      mkBundle({ answer: 'Dim x As Integer\nx = Session.Config()' }),
+    );
+    expect(s.mustNotIncludePresent).toEqual(['Dim ']);
+  });
+
+  it('normalizes backslashes in both needle and haystack', () => {
+    const q = { ...mkQuestion(), mustInclude: ['QER\\Person\\Blocked'] };
+    const s = extractSignals(
+      q,
+      mkBundle({ answer: 'Look at QER/Person/Blocked configuration parameter.' }),
+    );
+    expect(s.mustIncludeMissing).toEqual([]);
   });
 });

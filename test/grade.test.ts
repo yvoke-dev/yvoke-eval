@@ -32,7 +32,7 @@ describe('gradeOne', () => {
     expect(r.verdict.verdict).toBe('FAIL');
   });
 
-  it('never throws — a judge failure yields an ERROR verdict with must_include echoed as missing', async () => {
+  it('never throws — a judge failure yields an ERROR verdict without echoing must_include', async () => {
     const throwingJudge: Judge = {
       async review() {
         throw new Error('judge exploded');
@@ -42,7 +42,7 @@ describe('gradeOne', () => {
     const r = await gradeOne(q, mkBundle({ answer: 'x' }), throwingJudge, 5);
     expect(r.verdict.verdict).toBe('ERROR');
     expect(r.error).toContain('judge exploded');
-    expect(r.signals.mustIncludeMissing).toEqual(['Manager', 'Designer']);
+    expect(r.signals.mustIncludeMissing).toEqual([]);
     expect(r.totalTokens).toBe(0);
   });
 });

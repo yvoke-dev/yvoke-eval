@@ -65,9 +65,17 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
             .filter(isString),
         );
 
-  const hay = answer.toLowerCase();
-  const mustIncludeMissing = question.mustInclude.filter((s) => !hay.includes(s.toLowerCase()));
-  const mustNotIncludePresent = question.mustNotInclude.filter((s) => hay.includes(s.toLowerCase()));
+  const normHay = normalizeHaystack(answer);
+  const mustIncludeMissing = question.mustInclude.filter((s) => !normHay.includes(normalizeNeedle(s)));
+  if (question.mustIncludeAny && question.mustIncludeAny.length > 0) {
+    for (const group of question.mustIncludeAny) {
+      const match = group.some((s) => normHay.includes(normalizeNeedle(s)));
+      if (!match) {
+        mustIncludeMissing.push(group.join(' | '));
+      }
+    }
+  }
+  const mustNotIncludePresent = question.mustNotInclude.filter((s) => normHay.includes(normalizeNeedle(s)));
   const hasCitations = CITATION.test(answer) || answer.includes('## References');
   // Compared on the bare name, because the trace is stripped of the server prefix while a spec
   // names tools the way a playbook does.
@@ -119,3 +127,22 @@ function isString(v: string | null): v is string {
 function distinct<T>(xs: T[]): T[] {
   return [...new Set(xs)];
 }
+
+export function normalizeHaystack(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\\+/g, '/')
+    .replace(/\s+/g, ' ');
+}
+
+export function normalizeNeedle(needle: string): string {
+  return needle
+    .toLowerCase()
+    .replace(/\\+/g, '/')
+    .replace(/\s+/g, ' ');
+}
+
+export function normalizeText(text: string): string {
+  return normalizeNeedle(text);
+}
+

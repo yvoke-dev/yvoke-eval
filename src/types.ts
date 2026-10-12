@@ -35,6 +35,7 @@ export interface EvalQuestion {
   citationsRequired: boolean;
   critical: boolean;
   rubric: string | null;
+  mustIncludeAny?: string[][];
   // Orchestration-eval (Mode 3) expectations — OPTIONAL, opt-in per question. Absent for specialist /
   // MAS eval; the parser omits absent keys so a non-opt-in question's serialized shape is unchanged.
   expectedSpecialists?: string[];

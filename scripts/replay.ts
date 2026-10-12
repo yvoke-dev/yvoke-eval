@@ -161,13 +161,16 @@ async function main(): Promise<void> {
     if (done.size > 0) console.error(`resuming: ${done.size} verdict(s) already graded, re-grading the rest`);
   }
 
+  const targetQuestions =
+    oldByKey.size > 0 ? questions.filter((q) => oldByKey.has(`${q.category}.${q.id}`)) : questions;
+
   let n = 0;
-  for (const q of questions) {
+  for (const q of targetQuestions) {
     n++;
     if (done.has(`${q.category}.${q.id}`)) continue;
     const messages = sessions.get(q.question.trim());
     if (!messages) {
-      console.error(`[${n}/${questions.length}] ${q.category}.${q.id} → NO TRANSCRIPT (skipped)`);
+      console.error(`[${n}/${targetQuestions.length}] ${q.category}.${q.id} → NO TRANSCRIPT (skipped)`);
       continue;
     }
     const bundle = bundleFromMessages(messages);
@@ -181,7 +184,7 @@ async function main(): Promise<void> {
         (o.answer ?? '').trim() === bundle.answer.trim() &&
         JSON.stringify(o.signals.toolsFired) === JSON.stringify([...new Set(bundle.toolCalls.map((t) => t.name.replace(/^mcp__.+?__/, '')))]);
       console.error(
-        `[${n}/${questions.length}] ${q.category}.${q.id}  tools=${bundle.toolCalls.length} answer=${bundle.answer.length}ch ${o ? (same ? 'MATCHES recorded' : 'DIFFERS from recorded') : '(not in old run)'}`,
+        `[${n}/${targetQuestions.length}] ${q.category}.${q.id}  tools=${bundle.toolCalls.length} answer=${bundle.answer.length}ch ${o ? (same ? 'MATCHES recorded' : 'DIFFERS from recorded') : '(not in old run)'}`,
       );
       continue;
     }
@@ -190,10 +193,10 @@ async function main(): Promise<void> {
     const key = `${q.category}.${q.id}`;
     const before = oldByKey.get(key)?.verdict.verdict ?? '—';
     const flag = before !== '—' && before !== res.verdict.verdict ? `  ${before} → ${res.verdict.verdict}` : '';
-    console.error(`[${n}/${questions.length}] ${key} → ${res.verdict.verdict}${flag}`);
+    console.error(`[${n}/${targetQuestions.length}] ${key} → ${res.verdict.verdict}${flag}`);
     writeFileSync(outFile, `${JSON.stringify(out, null, 2)}\n`);
   }
-  console.error(`\nreplayed ${out.length}/${questions.length}; graderSha=${grader.sha}; out=${outFile}`);
+  console.error(`\nreplayed ${out.length}/${targetQuestions.length}; graderSha=${grader.sha}; out=${outFile}`);
 }
 
 void main();
