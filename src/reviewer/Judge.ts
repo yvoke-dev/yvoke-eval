@@ -11,6 +11,7 @@ export interface JudgeRequest {
   /** Verbatim tool results the model received. Lets the judge resolve claims that carry no chunk id
    *  (graph/section reads) instead of treating them as ungrounded. Omitted → evidence block absent. */
   evidence?: ToolEvidence[];
+  abortController?: AbortController;
 }
 
 /** The LLM-as-judge. Claude by default (ClaudeJudge); Gemini optional for cross-family audits. */
@@ -34,19 +35,21 @@ export interface StructuredModel {
     maxTokens: number;
     toolName: string;
     schema: unknown;
+    abortController?: AbortController;
   }): Promise<unknown>;
 }
 
 /**
- * Derive overall verdict deterministically from dimension scores:
- * - If any dimension is FAIL -> FAIL
- * - Else if any dimension is PARTIAL -> PARTIAL
- * - Else if all dimensions are PASS or NA -> PASS
- * - Else -> ERROR or FAIL
+ * Derive overall verdict deterministically from dimension scores matching rubric:
+ * - FAIL if any hard constraint fails: stop_rule FAIL, no_fabrication FAIL, grounding FAIL,
+ *   or on critical questions completeness/routing FAIL.
+ * - PASS only if all applicable (non-NA) dimensions are PASS.
+ * - PARTIAL otherwise (e.g. gaps in completeness, routing, or citations on non-critical questions).
  */
 export function deriveVerdictFromDimensions(
   dimensions: Record<string, string>,
   rawVerdict?: string,
+  isCritical: boolean = false,
 ): string {
   const vals = Object.values(dimensions);
   const nonNa = vals.filter((v) => v !== 'NA');
@@ -54,11 +57,22 @@ export function deriveVerdictFromDimensions(
   if (nonNa.length === 0) {
     return rawVerdict && rawVerdict !== 'ERROR' ? rawVerdict : (rawVerdict ?? 'ERROR');
   }
-  if (vals.some((v) => v === 'FAIL')) return 'FAIL';
-  if (vals.some((v) => v === 'PARTIAL')) return 'PARTIAL';
-  if (nonNa.every((v) => v === 'PASS')) return 'PASS';
+
+  // Hard constraints from rubric:
+  if (
+    dimensions['stop_rule'] === 'FAIL' ||
+    dimensions['no_fabrication'] === 'FAIL' ||
+    dimensions['grounding'] === 'FAIL' ||
+    (isCritical && (dimensions['completeness'] === 'FAIL' || dimensions['routing'] === 'FAIL'))
+  ) {
+    return 'FAIL';
+  }
+
   if (vals.some((v) => v === 'ERROR')) return 'ERROR';
-  return rawVerdict ?? 'FAIL';
+  if (nonNa.every((v) => v === 'PASS')) return 'PASS';
+
+  // Non-critical gaps in completeness/routing/citations or any PARTIAL -> PARTIAL
+  return 'PARTIAL';
 }
 
 /**
@@ -66,7 +80,11 @@ export function deriveVerdictFromDimensions(
  * variance (verdict/dimension values sometimes arrive nested), because the Agent SDK judge has no
  * responseSchema binding to guarantee the exact shape.
  */
-export function parseVerdict(raw: unknown, dims: readonly string[] = DIMENSIONS): Verdict {
+export function parseVerdict(
+  raw: unknown,
+  dims: readonly string[] = DIMENSIONS,
+  isCritical: boolean = false,
+): Verdict {
   if (!raw || typeof raw !== 'object') {
     return errorVerdict('unparseable reviewer output');
   }
@@ -80,8 +98,8 @@ export function parseVerdict(raw: unknown, dims: readonly string[] = DIMENSIONS)
   for (const dim of dims) {
     dimensions[dim] = pickEnum(dimsIn[dim], ['score', 'value', 'verdict', 'rating']) ?? 'NA';
   }
-  const derivedVerdict = deriveVerdictFromDimensions(dimensions, rawVerdict);
-  const verdict = derivedVerdict !== 'ERROR' ? derivedVerdict : rawVerdict;
+  const derivedVerdict = deriveVerdictFromDimensions(dimensions, rawVerdict, isCritical);
+  const verdict = derivedVerdict;
   let reasoning = typeof o.reasoning === 'string' ? o.reasoning : '';
   if (rawVerdict !== 'ERROR' && rawVerdict !== derivedVerdict) {
     reasoning = `[Verdict derived in code: ${derivedVerdict} (model returned ${rawVerdict})]\n${reasoning}`.trim();
@@ -133,8 +151,9 @@ export class ClaudeJudge implements Judge {
         maxTokens: this.opts.maxTokens ?? 2048,
         toolName: 'record_verdict',
         schema: VERDICT_SCHEMA,
+        abortController: req.abortController,
       });
-      return parseVerdict(raw);
+      return parseVerdict(raw, DIMENSIONS, req.question.critical);
     } catch (e) {
       return errorVerdict(`reviewer call failed: ${e instanceof Error ? e.message : String(e)}`);
     }

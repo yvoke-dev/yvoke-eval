@@ -15,12 +15,20 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { EvalSpecParser } from '../src/specs/EvalSpecParser';
 import { bundleFromMessages, type StreamMessage } from '../src/agent/capture';
+import type { AnswerBundle } from '../src/agent/AnswerBundle';
+import { extractSignals } from '../src/signals/SignalExtractor';
 import { gradeOne } from '../src/run/grade';
 import { ClaudeJudge } from '../src/reviewer/Judge';
 import { AgentSdkStructuredModel } from '../src/reviewer/AgentSdkStructuredModel';
 import { loadGrader } from '../src/reviewer/loadGrader';
 import { loadConfig, resolveSuite } from '../src/config/loadConfig';
 import type { EvalResult } from '../src/types';
+
+function collect(re: RegExp, text: string, into: Set<string>): void {
+  re.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) into.add(m[1]);
+}
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -172,7 +180,7 @@ async function main(): Promise<void> {
     if (process.env.DRY === '1') {
       if (o && o.toolEvidence != null && o.answer != null) {
         console.error(
-          `[${n}/${targetQuestions.length}] ${q.category}.${q.id}  evidence=${o.toolEvidence.length}ch answer=${o.answer.length}ch (self-contained from results.json)`,
+          `[${n}/${targetQuestions.length}] ${q.category}.${q.id}  evidence=${o.toolEvidence.length} items answer=${o.answer.length}ch (self-contained from results.json)`,
         );
       } else {
         const messages = sessions.get(q.question.trim());
@@ -195,26 +203,53 @@ async function main(): Promise<void> {
 
     let res: EvalResult;
     if (o && o.toolEvidence != null && o.answer != null) {
-      const signals = o.signals;
+      const chunkIds = new Set<string>();
+      for (const e of o.toolEvidence) {
+        if (e.resultText) {
+          collect(/\[chunk_id=([0-9a-fA-F-]{8,})\]/g, e.resultText, chunkIds);
+          collect(/\bid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g, e.resultText, chunkIds);
+        }
+      }
+      const syntheticBundle: AnswerBundle = {
+        answer: o.answer,
+        rawAnswer: o.rawAnswer ?? undefined,
+        toolCalls: o.toolEvidence.map((e) => ({
+          name: e.name,
+          argumentsJson: e.argumentsJson,
+          resultText: e.resultText,
+        })),
+        retrievedChunkIds: [...chunkIds],
+        promptTokens: o.promptTokens,
+        completionTokens: o.completionTokens,
+        totalTokens: o.totalTokens,
+        providerMeta: o.costUsd != null ? { costUsd: o.costUsd } : {},
+      };
+      const signals = extractSignals(q, syntheticBundle);
       const evidence = o.toolEvidence;
       const verdict = await judge.review({ question: q, answer: o.answer, signals, evidence });
-      if (signals.mustNotIncludePresent.length > 0) {
-        verdict.verdict = 'FAIL';
-        verdict.dimensions.no_fabrication = 'FAIL';
-      } else if (q.critical && signals.mustIncludeMissing.length > 0) {
-        verdict.verdict = 'FAIL';
-        verdict.dimensions.completeness = 'FAIL';
+      const isJudgeError = verdict.verdict === 'ERROR';
+      if (!isJudgeError) {
+        if (signals.mustNotIncludePresent.length > 0) {
+          verdict.verdict = 'FAIL';
+          verdict.dimensions.no_fabrication = 'FAIL';
+          verdict.reasoning = `[Deterministic safety FAIL: must_not_include present: ${signals.mustNotIncludePresent.join(', ')}]\n${verdict.reasoning}`.trim();
+        } else if (q.critical && signals.mustIncludeMissing.length > 0) {
+          verdict.verdict = 'FAIL';
+          verdict.dimensions.completeness = 'FAIL';
+          verdict.reasoning = `[Deterministic completeness FAIL on critical question: missing ${signals.mustIncludeMissing.join(', ')}]\n${verdict.reasoning}`.trim();
+        }
       }
       res = {
         question: q,
         answer: o.answer,
+        rawAnswer: o.rawAnswer ?? null,
         signals,
         verdict,
         promptTokens: o.promptTokens,
         completionTokens: o.completionTokens,
         totalTokens: o.totalTokens,
         latencyMs: 0,
-        error: null,
+        error: isJudgeError ? (verdict.reasoning || 'reviewer call failed') : null,
         toolEvidence: evidence,
         costUsd: o.costUsd,
       };

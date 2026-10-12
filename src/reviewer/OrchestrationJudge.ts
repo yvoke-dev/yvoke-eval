@@ -10,6 +10,7 @@ export interface OrchestrationJudgeRequest {
   answer: string;
   orchestrationSignals: OrchestrationSignals;
   trace: OrchestrationTrace;
+  abortController?: AbortController;
 }
 
 /** The orchestration LLM-as-judge (Mode 3). Reuses the same StructuredModel transport as ClaudeJudge. */
@@ -47,6 +48,7 @@ export class ClaudeOrchestrationJudge implements OrchestrationJudge {
         maxTokens: this.opts.maxTokens ?? 2048,
         toolName: 'record_orchestration_verdict',
         schema: ORCH_VERDICT_SCHEMA,
+        abortController: req.abortController,
       });
       return parseVerdict(raw, ORCH_DIMENSIONS);
     } catch (e) {

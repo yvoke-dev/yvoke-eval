@@ -60,6 +60,8 @@ export interface Signals {
    */
   expectedToolsMissing: string[];
   hasCitations: boolean;
+  /** UUID citations that appeared in the answer but never in any tool result. */
+  unverifiedCitations?: string[];
 }
 
 /**
@@ -164,6 +166,8 @@ export function errorVerdict(reason: string): Verdict {
 export interface EvalResult {
   question: EvalQuestion;
   answer: string | null;
+  /** Raw model output before any STOP block synthesis (e.g. post-denial prose). */
+  rawAnswer?: string | null;
   signals: Signals;
   verdict: Verdict;
   promptTokens: number;

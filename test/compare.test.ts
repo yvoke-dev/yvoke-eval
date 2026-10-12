@@ -12,12 +12,12 @@ import type { EvalResult } from '../src/types';
 
 const baselineDir = fileURLToPath(new URL('./fixtures/eval/baseline', import.meta.url));
 
-function mkResult(id: string, verdict: string, mustNotPresent: string[] = []): EvalResult {
+function mkResult(id: string, verdict: string, mustNotPresent: string[] = [], critical = false): EvalResult {
   return {
     question: {
       category: 'basics', id, question: 'q', playbook: 'p', expect: 'answer', versionTag: '1.0',
       targetTopic: null, mustInclude: [], mustNotInclude: [], expectToolCalled: [], bait: null,
-      citationsRequired: true, critical: false, rubric: null,
+      citationsRequired: true, critical, rubric: null,
     },
     answer: 'a',
     signals: {
@@ -73,8 +73,22 @@ describe('compareRunToBaseline', () => {
     const byCat = groupByCategory(results);
     const baseByCat = loadBaseline(baselineDir, [...byCat.keys()]);
     const report = compareRunToBaseline('self', byCat, baseByCat);
-    expect(report.gated).toBe(false);
-    expect(report.hardRegressions).toHaveLength(0);
     expect(report.categories[0].runPass).toBe(3);
+  });
+
+  it('distinguishes critical from non-critical hard regressions', () => {
+    const nonCritBase = [mkResult('Q1', 'PASS', [], false)];
+    const nonCritRun = [mkResult('Q1', 'FAIL', [], false)];
+    const rep1 = compareRunToBaseline('r1', new Map([['basics', nonCritRun]]), new Map([['basics', nonCritBase]]));
+    expect(rep1.gated).toBe(true);
+    expect(rep1.hardRegressions).toHaveLength(1);
+    expect(rep1.criticalHardRegressions).toHaveLength(0);
+
+    const critBase = [mkResult('Q1', 'PASS', [], true)];
+    const critRun = [mkResult('Q1', 'FAIL', [], true)];
+    const rep2 = compareRunToBaseline('r2', new Map([['basics', critRun]]), new Map([['basics', critBase]]));
+    expect(rep2.gated).toBe(true);
+    expect(rep2.hardRegressions).toHaveLength(1);
+    expect(rep2.criticalHardRegressions).toHaveLength(1);
   });
 });

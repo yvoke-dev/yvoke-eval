@@ -28,6 +28,7 @@ export class AgentSdkStructuredModel implements StructuredModel {
     maxTokens: number;
     toolName: string;
     schema: unknown;
+    abortController?: AbortController;
   }): Promise<unknown> {
     const options: Options = {
       systemPrompt: input.system,
@@ -44,6 +45,7 @@ export class AgentSdkStructuredModel implements StructuredModel {
       maxTurns: 4,
       cwd: this.opts.sandboxDir,
       env: sanitizedEnv(),
+      abortController: input.abortController,
     };
 
     const parts: string[] = [];

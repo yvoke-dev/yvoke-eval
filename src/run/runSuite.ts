@@ -92,21 +92,24 @@ export interface RunDeps {
   judge: Judge;
 }
 
-async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, label: string): Promise<T> {
+export async function withTimeout<T>(fn: (ac: AbortController) => Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  const ac = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s while ${label}`));
+      const err = new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s while ${label}`);
+      ac.abort(err);
+      reject(err);
     }, timeoutMs);
   });
   try {
-    return await Promise.race([fn(), timeoutPromise]);
+    return await Promise.race([fn(ac), timeoutPromise]);
   } finally {
     if (timer) clearTimeout(timer);
   }
 }
 
-class CachedPromptSource implements PromptSource {
+export class CachedPromptSource implements PromptSource {
   private listCache?: Promise<McpPromptInfo[]>;
   private textCache = new Map<string, Promise<string>>();
 
@@ -114,7 +117,10 @@ class CachedPromptSource implements PromptSource {
 
   list(): Promise<McpPromptInfo[]> {
     if (!this.listCache) {
-      this.listCache = this.inner.list();
+      this.listCache = this.inner.list().catch((err) => {
+        this.listCache = undefined;
+        throw err;
+      });
     }
     return this.listCache;
   }
@@ -123,7 +129,10 @@ class CachedPromptSource implements PromptSource {
     const key = `${name}:${JSON.stringify(args ?? {})}`;
     let p = this.textCache.get(key);
     if (!p) {
-      p = this.inner.getText(name, args);
+      p = this.inner.getText(name, args).catch((err) => {
+        this.textCache.delete(key);
+        throw err;
+      });
       this.textCache.set(key, p);
     }
     return p;
@@ -177,7 +186,7 @@ export async function runSuite(
   );
 
   // Build the answer producer for the selected mode.
-  let produce: (q: EvalQuestion) => Promise<AnswerBundle>;
+  let produce: (q: EvalQuestion, ac: AbortController) => Promise<AnswerBundle>;
   let answerModelLabel: string;
   let answerProvider: 'sdk-single' | 'sdk-mas';
   let thinkingLabel: string;
@@ -186,7 +195,7 @@ export async function runSuite(
     const orch = await buildOrchestrator(cfg.mas.profile, cfg.mas.tuning, prompts, systemPrompt, systemPromptClient);
     log(`Orchestrator ready: ${orch.specialistNames.length} specialists (${orch.specialistNames.join(', ')}).`);
     const masRunner = new MasAnswerRunner({ ...cfg.mcp, sandboxDir: cfg.sandboxDir, webAllowedDomains: cfg.webAllowedDomains }, orch);
-    produce = (q) => masRunner.run(q.question);
+    produce = (q, ac) => masRunner.run(q.question, { abortController: ac, expect: q.expect });
     answerModelLabel = cfg.mas.tuning.orchestrator.model;
     answerProvider = 'sdk-mas';
     thinkingLabel = cfg.mas.tuning.orchestrator.thinkingLevel;
@@ -199,13 +208,14 @@ export async function runSuite(
         maxTurns: cfg.maxTurns,
         webAllowedDomains: cfg.webAllowedDomains,
       });
-    produce = async (q) => {
+    produce = async (q, ac) => {
       const task = await buildEvalTask(q, prompts, {
         answerModel: cfg.answerModel,
         thinkingLevel: cfg.thinkingLevel,
         systemPrompt,
         systemPromptClient,
       });
+      task.abortController = ac;
       return runner.run(task);
     };
     answerModelLabel = cfg.answerModel;
@@ -221,40 +231,45 @@ export async function runSuite(
     const t0 = Date.now();
     let result: EvalResult;
     try {
-      const bundle = await withTimeout(() => produce(q), 180_000, `answering ${q.category}.${q.id}`);
+      const bundle = await withTimeout((ac) => produce(q, ac), 180_000, `answering ${q.category}.${q.id}`);
       if (!resolvedWorkerModel && typeof bundle.providerMeta?.resolvedModel === 'string') {
         resolvedWorkerModel = bundle.providerMeta.resolvedModel;
       }
       result = orchestrationMode
         ? await withTimeout(
-            () =>
-              gradeOrchestration(q, bundle, orchJudge!, Date.now() - t0, {
-                maxReviewRounds: cfg.mas!.tuning.maxReviewRounds,
-                orchestratorMaxTurns: cfg.mas!.tuning.orchestratorMaxTurns,
-              }),
+            (ac) =>
+              gradeOrchestration(
+                q,
+                bundle,
+                orchJudge!,
+                Date.now() - t0,
+                {
+                  maxReviewRounds: cfg.mas!.tuning.maxReviewRounds,
+                  orchestratorMaxTurns: cfg.mas!.tuning.orchestratorMaxTurns,
+                },
+                ac,
+              ),
             120_000,
             `grading orchestration ${q.category}.${q.id}`,
           )
         : await withTimeout(
-            () => gradeOne(q, bundle, judge, Date.now() - t0),
+            (ac) => gradeOne(q, bundle, judge, Date.now() - t0, ac),
             120_000,
             `grading ${q.category}.${q.id}`,
           );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       result = errorResult(q, msg, Date.now() - t0);
-      results.push(result);
-      log(`[${n}/${questions.length}] ${q.category}.${q.id} → ${result.verdict.verdict}`);
-      if (isQuotaOrAuthError(msg)) {
-        log(`\n[ABORT] Fatal quota or authentication failure on ${q.category}.${q.id}: ${msg}`);
-        if (isAuthError(msg)) log(LOGIN_INSTRUCTIONS);
-        if (isQuotaError(msg)) log(QUOTA_INSTRUCTIONS);
-        break;
-      }
-      continue;
     }
     results.push(result);
     log(`[${n}/${questions.length}] ${q.category}.${q.id} → ${result.verdict.verdict}`);
+    const errText = result.error ?? (result.verdict.verdict === 'ERROR' ? result.verdict.reasoning : null);
+    if (errText && isQuotaOrAuthError(errText)) {
+      log(`\n[ABORT] Fatal quota or authentication failure on ${q.category}.${q.id}: ${errText}`);
+      if (isAuthError(errText)) log(LOGIN_INSTRUCTIONS);
+      if (isQuotaError(errText)) log(QUOTA_INSTRUCTIONS);
+      break;
+    }
   }
 
   await prompts.close();
@@ -268,6 +283,7 @@ export async function runSuite(
     resolvedAnswerModel: resolvedWorkerModel ?? null,
     answerProvider,
     evalIntent: cfg.evalIntent,
+    scoringVersion: '2.0',
     sdkModel: answerModelLabel,
     sdkVersion: agentSdkVersion(),
     reviewerModel: cfg.reviewerModel,
@@ -325,9 +341,14 @@ export function selectQuestions(cfg: RunConfig): EvalQuestion[] {
   const all = new EvalSpecParser(cfg.evalDir, known).parse();
   const wanted = cfg.categories.length > 0 ? new Set(cfg.categories) : null;
   const byCategory = wanted ? all.filter((q) => wanted.has(q.category)) : all;
+  const intentFiltered = cfg.categories.length > 0
+    ? byCategory
+    : cfg.evalIntent === 'orchestration'
+      ? byCategory.filter((q) => q.category === 'orchestration_ie' || q.expectedSpecialists !== undefined)
+      : byCategory.filter((q) => q.category !== 'orchestration_ie');
   // Applied before the per-category cap, so `--expect clarify --limit 2` means two CLARIFY
   // questions per category rather than two questions of which some may be clarify.
-  const filtered = cfg.expect ? byCategory.filter((q) => q.expect === cfg.expect) : byCategory;
+  const filtered = cfg.expect ? intentFiltered.filter((q) => q.expect === cfg.expect) : intentFiltered;
   if (cfg.limit <= 0) return filtered;
   // Per-category cap.
   const counts = new Map<string, number>();

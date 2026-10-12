@@ -133,4 +133,137 @@ describe('ClaudeJudge', () => {
     expect(v.verdict).toBe('ERROR');
     expect(v.reasoning).toContain('boom');
   });
+
+  it('passes abortController to structuredModel.complete', async () => {
+    let capturedAc: AbortController | undefined;
+    const model: StructuredModel = {
+      async complete(input) {
+        capturedAc = input.abortController;
+        return { verdict: 'PASS', dimensions: {}, reasoning: 'ok' };
+      },
+    };
+    const judge = new ClaudeJudge(model, { model: 'opus', systemPrompt: 'r' });
+    const ac = new AbortController();
+    await judge.review({ question: mkQuestion(), answer: 'a', signals: SIGNALS, abortController: ac });
+    expect(capturedAc).toBe(ac);
+  });
+});
+
+describe('deriveVerdictFromDimensions', () => {
+  it('returns PARTIAL when completeness is FAIL on non-critical questions', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: { routing: 'PASS', grounding: 'PASS', completeness: 'FAIL' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false, // non-critical
+    );
+    expect(v.verdict).toBe('PARTIAL');
+  });
+
+  it('returns FAIL when completeness is FAIL on critical questions', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: { routing: 'PASS', grounding: 'PASS', completeness: 'FAIL' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      true, // critical
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns PARTIAL when routing is FAIL on non-critical questions', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: { routing: 'FAIL', grounding: 'PASS', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false, // non-critical
+    );
+    expect(v.verdict).toBe('PARTIAL');
+  });
+
+  it('returns FAIL when routing is FAIL on critical questions', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: { routing: 'FAIL', grounding: 'PASS', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      true, // critical
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns FAIL when grounding is FAIL regardless of critical status', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'PASS', grounding: 'FAIL', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns FAIL when no_fabrication is FAIL regardless of critical status', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'PASS', no_fabrication: 'FAIL', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns FAIL when stop_rule is FAIL regardless of critical status', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'PASS', stop_rule: 'FAIL', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns PASS when all applicable non-NA dimensions are PASS', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'PASS', grounding: 'PASS', completeness: 'PASS', citations: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('PASS');
+  });
+
+  it('returns ERROR when any dimension is ERROR', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'ERROR', grounding: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('ERROR');
+  });
 });

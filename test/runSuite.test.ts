@@ -1,8 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, rmSync } from 'node:fs';
+import { readFileSync, rmSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { runSuite, selectQuestions, type RunConfig, type RunDeps } from '../src/run/runSuite';
+import {
+  runSuite,
+  selectQuestions,
+  withTimeout,
+  CachedPromptSource,
+  type RunConfig,
+  type RunDeps,
+} from '../src/run/runSuite';
 import { SYSTEM_PROMPT_NAME } from '../src/server/SystemPromptClient';
 import type { PromptSource } from '../src/mcp/McpPrompts';
 import type { EvalTask } from '../src/agent/AnswerBundle';
@@ -238,3 +246,165 @@ describe('runSuite — playbook-designated system prompt resolution', () => {
     }
   });
 });
+
+describe('withTimeout', () => {
+  it('aborts the AbortController when timing out', async () => {
+    let signalAborted = false;
+    let abortReason: unknown;
+    await expect(
+      withTimeout(
+        async (ac) => {
+          ac.signal.addEventListener('abort', () => {
+            signalAborted = true;
+            abortReason = ac.signal.reason;
+          });
+          await new Promise((r) => setTimeout(r, 100));
+          return 'ok';
+        },
+        10,
+        'test operation',
+      ),
+    ).rejects.toThrow(/Timed out after 0s while test operation/);
+
+    expect(signalAborted).toBe(true);
+    expect(abortReason).toBeInstanceOf(Error);
+    expect((abortReason as Error).message).toMatch(/Timed out/);
+  });
+});
+
+describe('CachedPromptSource', () => {
+  it('evicts failed getText promises so subsequent calls can retry', async () => {
+    let attempts = 0;
+    const inner: PromptSource = {
+      list: async () => [],
+      getText: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error('transient failure');
+        return 'success';
+      },
+      serverVersion: () => undefined,
+      close: async () => {},
+    };
+    const cached = new CachedPromptSource(inner);
+    await expect(cached.getText('test')).rejects.toThrow('transient failure');
+    const res = await cached.getText('test');
+    expect(res).toBe('success');
+    expect(attempts).toBe(2);
+  });
+
+  it('evicts failed list promises so subsequent calls can retry', async () => {
+    let attempts = 0;
+    const inner: PromptSource = {
+      list: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error('transient failure');
+        return [{ name: 'p1', title: 'P1', description: '', tools: [] }];
+      },
+      getText: async () => '',
+      serverVersion: () => undefined,
+      close: async () => {},
+    };
+    const cached = new CachedPromptSource(inner);
+    await expect(cached.list()).rejects.toThrow('transient failure');
+    const res = await cached.list();
+    expect(res).toHaveLength(1);
+    expect(attempts).toBe(2);
+  });
+});
+
+describe('runSuite — judge quota exhaustion aborts suite', () => {
+  it('stops suite immediately with aborted: true when judge returns quota error', async () => {
+    const h = harness();
+    let judgeCalls = 0;
+    h.deps.judge = {
+      async review() {
+        judgeCalls++;
+        return {
+          verdict: 'ERROR',
+          dimensions: {},
+          reasoning: '429 You have exhausted your capacity limit. Please wait before retrying.',
+          evidence: [],
+        };
+      },
+    };
+    // basics has 6 questions (Q1..Q5, Q7; Q6 is skipped), limit: 0 runs all
+    const summary = await runSuite(cfg({ limit: 0 }), () => {}, h.deps);
+    try {
+      expect(judgeCalls).toBe(1); // Aborted after the first question!
+      expect(summary.aborted).toBe(true);
+      expect(summary.abortReason).toBeDefined();
+      expect(summary.error).toBe(1);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+});
+
+describe('runSuite — scoring version', () => {
+  it('records scoringVersion 2.0 in run_meta.json', async () => {
+    const h = harness();
+    const summary = await runSuite(cfg(), () => {}, h.deps);
+    try {
+      const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
+      expect(meta.scoringVersion).toBe('2.0');
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+});
+
+describe('selectQuestions — orchestration_ie filtering', () => {
+  it('filters out orchestration_ie when in specialist intent with no categories specified', () => {
+    const dir = mkdtempSync(join(os.tmpdir(), 'yvoke-select-'));
+    try {
+      writeFileSync(
+        join(dir, 'eval_specs.yaml'),
+        `
+basics:
+  Q1: {}
+orchestration_ie:
+  Q1:
+    expected_specialists: [specialist-a]
+`,
+      );
+      writeFileSync(join(dir, 'eval_basics.md'), '# Basics\n\n## Q1 — Question 1\n');
+      writeFileSync(
+        join(dir, 'eval_orchestration_ie.md'),
+        '# Orchestration\n\n## Q1 — Question 1\n',
+      );
+
+      const specialist = selectQuestions(cfg({ evalDir: dir, evalIntent: 'specialist', categories: [] }));
+      expect(specialist.some((q) => q.category === 'orchestration_ie')).toBe(false);
+      expect(specialist.some((q) => q.category === 'basics')).toBe(true);
+
+      const orchestration = selectQuestions(
+        cfg({
+          evalDir: dir,
+          evalIntent: 'orchestration',
+          categories: [],
+          mas: {
+            profile: {
+              orchestratorPlaybook: 'skills/oim-orchestrator.md',
+              reviewerPlaybook: 'skills/oim-reviewer.md',
+              specialistPlaybooks: ['specialist-a'],
+            },
+            tuning: {
+              orchestrator: { model: 'sonnet', thinkingLevel: 'off' },
+              reviewer: { configuredModel: 'haiku', model: 'haiku', thinkingLevel: 'off' },
+              specialist: { model: 'haiku', thinkingLevel: 'off' },
+              maxReviewRounds: 1,
+              maxSpecialistCalls: 4,
+              orchestratorMaxTurns: 4,
+              specialistMaxTurns: 4,
+            },
+          },
+        }),
+      );
+      expect(orchestration.some((q) => q.category === 'orchestration_ie')).toBe(true);
+      expect(orchestration.some((q) => q.category === 'basics')).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

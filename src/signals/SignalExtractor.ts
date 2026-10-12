@@ -46,7 +46,7 @@ const SEARCHED_HEADER = /^Searched\s+\*\*(.+?)\*\*/m;
 
 export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Signals {
   const answer = bundle.answer ?? '';
-  const toolsFired = distinct(bundle.toolCalls.map((t) => stripPrefix(t.name)));
+  const toolsFired = distinct(bundle.toolCalls.filter((t) => !t.isError).map((t) => stripPrefix(t.name)));
 
   const searchCollections = distinct(
     bundle.toolCalls.map((t) => collectionArg(t.argumentsJson)).filter(isString),
@@ -84,6 +84,24 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
     (t) => !firedBare.has(stripPrefix(t).toLowerCase()),
   );
 
+  // Cross-reference cited UUIDs against evidence:
+  const UUID_REGEX = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
+  const citedUuids = distinct([...(answer.match(UUID_REGEX) ?? [])].map((u) => u.toLowerCase()));
+  let unverifiedCitations: string[] | undefined;
+  if (citedUuids.length > 0) {
+    const knownUuids = new Set(chunkIds.map((u) => u.toLowerCase()));
+    for (const t of bundle.toolCalls) {
+      if (t.resultText) {
+        const matches = t.resultText.match(UUID_REGEX);
+        if (matches) {
+          for (const m of matches) knownUuids.add(m.toLowerCase());
+        }
+      }
+    }
+    const missing = citedUuids.filter((u) => !knownUuids.has(u));
+    if (missing.length > 0) unverifiedCitations = missing;
+  }
+
   return {
     toolsFired,
     searchCollections,
@@ -93,6 +111,7 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
     mustNotIncludePresent,
     expectedToolsMissing,
     hasCitations,
+    ...(unverifiedCitations ? { unverifiedCitations } : {}),
   };
 }
 

@@ -18,33 +18,38 @@ export async function gradeOne(
   bundle: AnswerBundle,
   judge: Judge,
   latencyMs: number,
+  abortController?: AbortController,
 ): Promise<EvalResult> {
   try {
     const signals = extractSignals(question, bundle);
     const evidence = toEvidence(bundle.toolCalls);
-    const verdict = await judge.review({ question, answer: bundle.answer, signals, evidence });
+    const verdict = await judge.review({ question, answer: bundle.answer, signals, evidence, abortController });
 
-    // Hard deterministic guardrails enforced in code:
-    if (signals.mustNotIncludePresent.length > 0) {
-      verdict.verdict = 'FAIL';
-      verdict.dimensions.no_fabrication = 'FAIL';
-      verdict.reasoning = `[Deterministic safety FAIL: must_not_include present: ${signals.mustNotIncludePresent.join(', ')}]\n${verdict.reasoning}`.trim();
-    } else if (question.critical && signals.mustIncludeMissing.length > 0) {
-      verdict.verdict = 'FAIL';
-      verdict.dimensions.completeness = 'FAIL';
-      verdict.reasoning = `[Deterministic completeness FAIL on critical question: missing ${signals.mustIncludeMissing.join(', ')}]\n${verdict.reasoning}`.trim();
+    const isJudgeError = verdict.verdict === 'ERROR';
+    // Hard deterministic guardrails enforced in code only when judge succeeded:
+    if (!isJudgeError) {
+      if (signals.mustNotIncludePresent.length > 0) {
+        verdict.verdict = 'FAIL';
+        verdict.dimensions.no_fabrication = 'FAIL';
+        verdict.reasoning = `[Deterministic safety FAIL: must_not_include present: ${signals.mustNotIncludePresent.join(', ')}]\n${verdict.reasoning}`.trim();
+      } else if (question.critical && signals.mustIncludeMissing.length > 0) {
+        verdict.verdict = 'FAIL';
+        verdict.dimensions.completeness = 'FAIL';
+        verdict.reasoning = `[Deterministic completeness FAIL on critical question: missing ${signals.mustIncludeMissing.join(', ')}]\n${verdict.reasoning}`.trim();
+      }
     }
 
     return {
       question,
       answer: bundle.answer,
+      rawAnswer: bundle.rawAnswer ?? null,
       signals,
       verdict,
       promptTokens: bundle.promptTokens,
       completionTokens: bundle.completionTokens,
       totalTokens: bundle.totalTokens,
       latencyMs,
-      error: null,
+      error: isJudgeError ? (verdict.reasoning || 'reviewer call failed') : null,
       toolEvidence: evidence,
       costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
     };
@@ -53,6 +58,7 @@ export async function gradeOne(
     return {
       question,
       answer: bundle.answer,
+      rawAnswer: bundle.rawAnswer ?? null,
       signals: {
         toolsFired: [],
         searchCollections: [],
@@ -110,14 +116,17 @@ export async function gradeOrchestration(
   judge: OrchestrationJudge,
   latencyMs: number,
   caps: OrchestrationCaps,
+  abortController?: AbortController,
 ): Promise<EvalResult> {
   const trace = bundle.orchestration ?? EMPTY_TRACE;
   try {
     const orchestrationSignals = extractOrchestrationSignals(question, trace, caps);
-    const verdict = await judge.review({ question, answer: bundle.answer, orchestrationSignals, trace });
+    const verdict = await judge.review({ question, answer: bundle.answer, orchestrationSignals, trace, abortController });
+    const isJudgeError = verdict.verdict === 'ERROR';
     return {
       question,
       answer: bundle.answer,
+      rawAnswer: bundle.rawAnswer ?? null,
       signals: emptySignals(),
       verdict,
       orchestrationSignals,
@@ -127,13 +136,16 @@ export async function gradeOrchestration(
       completionTokens: bundle.completionTokens,
       totalTokens: bundle.totalTokens,
       latencyMs,
-      error: null,
+      error: isJudgeError ? (verdict.reasoning || 'orchestration reviewer call failed') : null,
+      toolEvidence: toEvidence(bundle.toolCalls),
+      costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return {
       question,
       answer: bundle.answer,
+      rawAnswer: bundle.rawAnswer ?? null,
       signals: emptySignals(),
       verdict: errorVerdict(msg),
       orchestration: trace,
@@ -142,6 +154,8 @@ export async function gradeOrchestration(
       totalTokens: 0,
       latencyMs,
       error: msg,
+      toolEvidence: toEvidence(bundle.toolCalls),
+      costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
     };
   }
 }

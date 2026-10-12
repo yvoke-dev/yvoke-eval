@@ -32,11 +32,13 @@ export interface EvalTask {
   playbookTools?: string[];
   thinkingLevel: ThinkingLevel;
   codeExecution: boolean;
+  abortController?: AbortController;
 }
 
 /** Provider-agnostic result of producing one answer — the sole input to signal extraction. */
 export interface AnswerBundle {
   answer: string;
+  rawAnswer?: string;
   toolCalls: ToolInvocation[];
   retrievedChunkIds: string[];
   promptTokens: number;

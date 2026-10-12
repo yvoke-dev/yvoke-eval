@@ -48,6 +48,7 @@ async function main(): Promise<void> {
       run: { type: 'string' },
       baseline: { type: 'string' },
       gate: { type: 'boolean' },
+      'gate-critical': { type: 'boolean' },
     },
   });
 
@@ -114,7 +115,7 @@ async function cmdRun(cfg: EvalConfig, values: Record<string, unknown>, contentR
 
 function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positionals: string[], contentRoot: string): void {
   const runArg = (values.run as string | undefined) ?? positionals[1];
-  if (!runArg) throw new UserError('compare needs a run: `eval compare --run <run-dir-or-id> [--baseline <dir>] [--gate]`');
+  if (!runArg) throw new UserError('compare needs a run: `eval compare --run <run-dir-or-id> [--baseline <dir>] [--gate] [--gate-critical]`');
   const evalDir = resolve(contentRoot, cfg.evalDir ?? './eval');
   const runDir = resolveRunDir(runArg, evalDir, contentRoot);
   const baselineDir = resolve(contentRoot, (values.baseline as string | undefined) ?? cfg.baselineDir ?? baselineDefaultFor(resolveEvalIntent(values, cfg)));
