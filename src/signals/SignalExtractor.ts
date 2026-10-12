@@ -48,7 +48,7 @@ const UUID_MATCH_REGEX =
   /(?<![0-9a-fA-F])(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})(?![0-9a-fA-F])/g;
 
 function normalizeUuid(id: string): string {
-  return id.replace(/-/g, '').toLowerCase();
+  return id.trim().replace(/-/g, '').toLowerCase();
 }
 
 export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Signals {

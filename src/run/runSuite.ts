@@ -441,7 +441,7 @@ function harnessGitSha(): string {
     const sha = execSync('git rev-parse --short HEAD', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()
       .trim();
-    const status = execSync('git status --porcelain', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
+    const status = execSync('git status --porcelain -uno', { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()
       .trim();
     return status.length > 0 ? `${sha}-dirty` : sha;
@@ -455,7 +455,7 @@ function gitShaForDir(dir: string): string | null {
     const sha = execSync('git rev-parse --short HEAD', { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()
       .trim();
-    const status = execSync('git status --porcelain', { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] })
+    const status = execSync('git status --porcelain -uno', { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString()
       .trim();
     return status.length > 0 ? `${sha}-dirty` : sha;
