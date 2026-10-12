@@ -171,6 +171,10 @@ export interface EvalResult {
   totalTokens: number;
   latencyMs: number;
   error: string | null;
+  /** Persisted tool evidence shown to the judge — enables 100% offline re-grading without transcripts. */
+  toolEvidence?: import('./agent/AnswerBundle').ToolEvidence[];
+  /** Cumulative session cost in USD. */
+  costUsd?: number;
   // Orchestration eval (Mode 3) — OPTIONAL, present only on the orchestration path. Appended so the
   // specialist / MAS results.json shape is unchanged (absent → omitted by JSON.stringify).
   orchestrationSignals?: OrchestrationSignals;

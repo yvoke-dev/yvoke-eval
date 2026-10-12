@@ -8,6 +8,7 @@ export interface QuestionDiff {
   id: string;
   baseVerdict: string;
   runVerdict: string;
+  critical?: boolean;
   kind: 'improved' | 'same' | 'soft-regression' | 'hard-regression' | 'new';
 }
 
@@ -24,6 +25,7 @@ export interface CompareReport {
   runId: string;
   categories: CategoryDiff[];
   hardRegressions: QuestionDiff[];
+  criticalHardRegressions: QuestionDiff[];
   softRegressions: QuestionDiff[];
   improvements: QuestionDiff[];
   /** True when the run should FAIL a `--gate` check (any hard regression). */
@@ -70,6 +72,7 @@ export function compareRunToBaseline(
 ): CompareReport {
   const categories: CategoryDiff[] = [];
   const hardRegressions: QuestionDiff[] = [];
+  const criticalHardRegressions: QuestionDiff[] = [];
   const softRegressions: QuestionDiff[] = [];
   const improvements: QuestionDiff[] = [];
 
@@ -82,16 +85,22 @@ export function compareRunToBaseline(
       const runV = effectiveVerdict(r);
       const base = baseById.get(r.question.id);
       if (!base) {
-        questions.push({ category, id: r.question.id, baseVerdict: '—', runVerdict: runV, kind: 'new' });
+        questions.push({ category, id: r.question.id, baseVerdict: '—', runVerdict: runV, critical: r.question.critical, kind: 'new' });
         continue;
       }
       const baseV = effectiveVerdict(base);
       const kind = classify(baseV, runV);
-      const diff: QuestionDiff = { category, id: r.question.id, baseVerdict: baseV, runVerdict: runV, kind };
+      const isCritical = r.question.critical === true || base.question.critical === true;
+      const diff: QuestionDiff = { category, id: r.question.id, baseVerdict: baseV, runVerdict: runV, critical: isCritical, kind };
       questions.push(diff);
-      if (kind === 'hard-regression') hardRegressions.push(diff);
-      else if (kind === 'soft-regression') softRegressions.push(diff);
-      else if (kind === 'improved') improvements.push(diff);
+      if (kind === 'hard-regression') {
+        hardRegressions.push(diff);
+        if (isCritical) criticalHardRegressions.push(diff);
+      } else if (kind === 'soft-regression') {
+        softRegressions.push(diff);
+      } else if (kind === 'improved') {
+        improvements.push(diff);
+      }
     }
 
     categories.push({
@@ -108,6 +117,7 @@ export function compareRunToBaseline(
     runId,
     categories,
     hardRegressions,
+    criticalHardRegressions,
     softRegressions,
     improvements,
     gated: hardRegressions.length > 0,
@@ -138,13 +148,14 @@ export function renderCompareReport(report: CompareReport): string {
   }
   out.push('');
   out.push(
-    `**${report.hardRegressions.length} hard regression(s), ${report.softRegressions.length} soft, ${report.improvements.length} improvement(s).**`,
+    `**${report.hardRegressions.length} hard regression(s) (${report.criticalHardRegressions.length} critical), ${report.softRegressions.length} soft, ${report.improvements.length} improvement(s).**`,
   );
   if (report.hardRegressions.length > 0) {
     out.push('');
     out.push('## Hard regressions');
     for (const q of report.hardRegressions) {
-      out.push(`- ${q.category}.${q.id}: ${q.baseVerdict} → **${q.runVerdict}**`);
+      const critMarker = q.critical ? ' **[CRITICAL]**' : '';
+      out.push(`- ${q.category}.${q.id}${critMarker}: ${q.baseVerdict} → **${q.runVerdict}**`);
     }
   }
   return out.join('\n');

@@ -32,6 +32,8 @@ export class AgentSdkStructuredModel implements StructuredModel {
     const options: Options = {
       systemPrompt: input.system,
       allowedTools: [],
+      tools: [],
+      strictMcpConfig: true,
       mcpServers: {},
       settingSources: [],
       includePartialMessages: false,

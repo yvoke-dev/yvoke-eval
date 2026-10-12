@@ -62,6 +62,7 @@ export class MasAnswerRunner {
         },
       ),
       settingSources: [],
+      strictMcpConfig: true,
       includePartialMessages: false,
       model: this.orch.orchestratorModel,
       maxThinkingTokens: thinkingBudget(this.orch.orchestratorThinking),
@@ -94,10 +95,9 @@ export class MasAnswerRunner {
 }
 
 /**
- * Assemble the final AnswerBundle: attach the orchestration trace, and on the clarify path (empty
- * answer + a captured clarification) replace the answer with the clarifying-question marker WHILE
- * keeping the trace. Extracted as a pure function so the trace-preservation contract is unit-tested
- * (run() itself drives query() and is integration-only).
+ * Assemble the final AnswerBundle: attach the orchestration trace, and on the clarify path
+ * replace the answer with the clarifying-question marker WHILE keeping the trace. Extracted as a pure
+ * function so the trace-preservation contract is unit-tested (run() itself drives query() and is integration-only).
  */
 export function assembleMasBundle(
   base: AnswerBundle,
@@ -105,7 +105,7 @@ export function assembleMasBundle(
   clarify?: { question: string; options: string[] },
 ): AnswerBundle {
   const bundle: AnswerBundle = { ...base, orchestration: trace };
-  if (clarify && bundle.answer.trim().length === 0) {
+  if (clarify) {
     const opts = clarify.options.length > 0 ? `\noptions: ${clarify.options.join(' | ')}` : '';
     return { ...bundle, answer: `<clarifying-question>${clarify.question}${opts}</clarifying-question>` };
   }

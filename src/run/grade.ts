@@ -23,6 +23,18 @@ export async function gradeOne(
     const signals = extractSignals(question, bundle);
     const evidence = toEvidence(bundle.toolCalls);
     const verdict = await judge.review({ question, answer: bundle.answer, signals, evidence });
+
+    // Hard deterministic guardrails enforced in code:
+    if (signals.mustNotIncludePresent.length > 0) {
+      verdict.verdict = 'FAIL';
+      verdict.dimensions.no_fabrication = 'FAIL';
+      verdict.reasoning = `[Deterministic safety FAIL: must_not_include present: ${signals.mustNotIncludePresent.join(', ')}]\n${verdict.reasoning}`.trim();
+    } else if (question.critical && signals.mustIncludeMissing.length > 0) {
+      verdict.verdict = 'FAIL';
+      verdict.dimensions.completeness = 'FAIL';
+      verdict.reasoning = `[Deterministic completeness FAIL on critical question: missing ${signals.mustIncludeMissing.join(', ')}]\n${verdict.reasoning}`.trim();
+    }
+
     return {
       question,
       answer: bundle.answer,
@@ -33,6 +45,8 @@ export async function gradeOne(
       totalTokens: bundle.totalTokens,
       latencyMs,
       error: null,
+      toolEvidence: evidence,
+      costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -55,6 +69,8 @@ export async function gradeOne(
       totalTokens: 0,
       latencyMs,
       error: msg,
+      toolEvidence: toEvidence(bundle.toolCalls),
+      costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
     };
   }
 }

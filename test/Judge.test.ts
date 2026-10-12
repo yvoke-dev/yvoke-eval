@@ -18,7 +18,7 @@ const SIGNALS: Signals = {
 };
 
 describe('parseVerdict', () => {
-  it('maps a full verdict object', () => {
+  it('maps a full verdict object and derives verdict deterministically', () => {
     const v = parseVerdict({
       verdict: 'PASS',
       dimensions: {
@@ -32,9 +32,10 @@ describe('parseVerdict', () => {
       reasoning: 'looks good',
       evidence: ['cited the manual'],
     });
-    expect(v.verdict).toBe('PASS');
+    // completeness: PARTIAL strictly derives overall PARTIAL
+    expect(v.verdict).toBe('PARTIAL');
     expect(v.dimensions.completeness).toBe('PARTIAL');
-    expect(v.reasoning).toBe('looks good');
+    expect(v.reasoning).toContain('[Verdict derived in code: PARTIAL (model returned PASS)]');
     expect(v.evidence).toEqual(['cited the manual']);
   });
 
@@ -52,12 +53,12 @@ describe('parseVerdict', () => {
   it('normalizes lower-case and reads nested verdict/dimension shapes', () => {
     const v = parseVerdict({
       verdict: 'pass',
-      dimensions: { routing: { score: 'pass' }, grounding: 'PARTIAL' },
+      dimensions: { routing: { score: 'pass' }, grounding: 'PASS' },
       reasoning: 'x',
     });
     expect(v.verdict).toBe('PASS');
     expect(v.dimensions.routing).toBe('PASS'); // unwrapped from { score }
-    expect(v.dimensions.grounding).toBe('PARTIAL');
+    expect(v.dimensions.grounding).toBe('PASS');
     expect(v.dimensions.citations).toBe('NA'); // absent → default
   });
 

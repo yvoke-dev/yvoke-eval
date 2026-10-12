@@ -20,8 +20,14 @@ describe('assembleMasBundle', () => {
     expect(b.orchestration).toBe(trace); // trace still attached on the clarify branch
   });
 
-  it('does NOT trigger clarify when a real answer is present', () => {
+  it('triggers clarify when a captured clarification is present, overriding post-denial prose', () => {
     const b = assembleMasBundle(mkBundle({ answer: 'real answer' }), trace, { question: 'q', options: [] });
+    expect(b.answer).toBe('<clarifying-question>q</clarifying-question>');
+    expect(b.orchestration).toBe(trace);
+  });
+
+  it('does NOT trigger clarify when clarify is undefined', () => {
+    const b = assembleMasBundle(mkBundle({ answer: 'real answer' }), trace, undefined);
     expect(b.answer).toBe('real answer');
     expect(b.orchestration).toBe(trace);
   });

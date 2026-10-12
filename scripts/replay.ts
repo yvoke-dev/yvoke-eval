@@ -167,28 +167,67 @@ async function main(): Promise<void> {
   let n = 0;
   for (const q of targetQuestions) {
     n++;
-    if (done.has(`${q.category}.${q.id}`)) continue;
-    const messages = sessions.get(q.question.trim());
-    if (!messages) {
-      console.error(`[${n}/${targetQuestions.length}] ${q.category}.${q.id} → NO TRANSCRIPT (skipped)`);
-      continue;
-    }
-    const bundle = bundleFromMessages(messages);
+    const o = oldByKey.get(`${q.category}.${q.id}`);
+
     if (process.env.DRY === '1') {
-      // Reconstruction check only — no judge calls. Compares rebuilt signals to the recorded run.
-      const o = oldByKey.get(`${q.category}.${q.id}`);
-      // EvalResult.answer is nullable — an ERROR result in the old run has none, and comparing it
-      // would throw mid-replay rather than reporting a mismatch.
-      const same =
-        o != null &&
-        (o.answer ?? '').trim() === bundle.answer.trim() &&
-        JSON.stringify(o.signals.toolsFired) === JSON.stringify([...new Set(bundle.toolCalls.map((t) => t.name.replace(/^mcp__.+?__/, '')))]);
-      console.error(
-        `[${n}/${targetQuestions.length}] ${q.category}.${q.id}  tools=${bundle.toolCalls.length} answer=${bundle.answer.length}ch ${o ? (same ? 'MATCHES recorded' : 'DIFFERS from recorded') : '(not in old run)'}`,
-      );
+      if (o && o.toolEvidence != null && o.answer != null) {
+        console.error(
+          `[${n}/${targetQuestions.length}] ${q.category}.${q.id}  evidence=${o.toolEvidence.length}ch answer=${o.answer.length}ch (self-contained from results.json)`,
+        );
+      } else {
+        const messages = sessions.get(q.question.trim());
+        if (!messages) {
+          console.error(`[${n}/${targetQuestions.length}] ${q.category}.${q.id} → NO TRANSCRIPT (skipped)`);
+        } else {
+          const bundle = bundleFromMessages(messages);
+          const same =
+            o != null &&
+            (o.answer ?? '').trim() === bundle.answer.trim() &&
+            JSON.stringify(o.signals.toolsFired) ===
+              JSON.stringify([...new Set(bundle.toolCalls.map((t) => t.name.replace(/^mcp__.+?__/, '')))]);
+          console.error(
+            `[${n}/${targetQuestions.length}] ${q.category}.${q.id}  tools=${bundle.toolCalls.length} answer=${bundle.answer.length}ch ${o ? (same ? 'MATCHES recorded' : 'DIFFERS from recorded') : '(not in old run)'}`,
+          );
+        }
+      }
       continue;
     }
-    const res = await gradeOne(q, bundle, judge, 0);
+
+    let res: EvalResult;
+    if (o && o.toolEvidence != null && o.answer != null) {
+      const signals = o.signals;
+      const evidence = o.toolEvidence;
+      const verdict = await judge.review({ question: q, answer: o.answer, signals, evidence });
+      if (signals.mustNotIncludePresent.length > 0) {
+        verdict.verdict = 'FAIL';
+        verdict.dimensions.no_fabrication = 'FAIL';
+      } else if (q.critical && signals.mustIncludeMissing.length > 0) {
+        verdict.verdict = 'FAIL';
+        verdict.dimensions.completeness = 'FAIL';
+      }
+      res = {
+        question: q,
+        answer: o.answer,
+        signals,
+        verdict,
+        promptTokens: o.promptTokens,
+        completionTokens: o.completionTokens,
+        totalTokens: o.totalTokens,
+        latencyMs: 0,
+        error: null,
+        toolEvidence: evidence,
+        costUsd: o.costUsd,
+      };
+    } else {
+      const messages = sessions.get(q.question.trim());
+      if (!messages) {
+        console.error(`[${n}/${targetQuestions.length}] ${q.category}.${q.id} → NO TRANSCRIPT (skipped)`);
+        continue;
+      }
+      const bundle = bundleFromMessages(messages);
+      res = await gradeOne(q, bundle, judge, 0);
+    }
+
     out.push(res);
     const key = `${q.category}.${q.id}`;
     const before = oldByKey.get(key)?.verdict.verdict ?? '—';

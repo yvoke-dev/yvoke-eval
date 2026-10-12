@@ -102,10 +102,14 @@ async function cmdRun(cfg: EvalConfig, values: Record<string, unknown>, contentR
       `via ${answerLabel}, judge=${runConfig.reviewerModel} against ${runConfig.mcp.serverBaseUrl}`,
   );
   const summary = await runSuite(runConfig);
+  const abortNote = summary.aborted ? ` [ABORTED: ${summary.abortReason ?? 'early stop'}]` : '';
   console.error(
-    `\nDone: ${summary.pass} PASS / ${summary.partial} PARTIAL / ${summary.fail} FAIL / ${summary.error} ERROR (of ${summary.total})`,
+    `\nDone: ${summary.pass} PASS / ${summary.partial} PARTIAL / ${summary.fail} FAIL / ${summary.error} ERROR (of ${summary.total})${abortNote}`,
   );
   for (const dir of summary.runDirs) console.log(dir);
+  if (summary.error > 0 || summary.aborted) {
+    process.exit(1);
+  }
 }
 
 function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positionals: string[], contentRoot: string): void {
@@ -120,8 +124,12 @@ function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positional
   const report = compareRunToBaseline(basename(runDir), byCat, baseByCat);
 
   console.log(renderCompareReport(report));
+  if (values['gate-critical'] && report.criticalHardRegressions.length > 0) {
+    console.error(`\nGATE FAILED: ${report.criticalHardRegressions.length} critical hard regression(s).`);
+    process.exit(1);
+  }
   if (values.gate && report.gated) {
-    console.error(`\nGATE FAILED: ${report.hardRegressions.length} hard regression(s).`);
+    console.error(`\nGATE FAILED: ${report.hardRegressions.length} hard regression(s) (${report.criticalHardRegressions.length} critical).`);
     process.exit(1);
   }
 }

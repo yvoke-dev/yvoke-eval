@@ -1,9 +1,10 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { UserError, type EvalQuestion, type EvalResult, type ThinkingLevel } from '../types';
 import type { AnswerBundle } from '../agent/AnswerBundle';
 import { EvalSpecParser } from '../specs/EvalSpecParser';
-import { McpPrompts, type PromptSource } from '../mcp/McpPrompts';
+import { McpPrompts, type PromptSource, type McpPromptInfo } from '../mcp/McpPrompts';
 import { SystemPromptClient, SYSTEM_PROMPT_NAME } from '../server/SystemPromptClient';
 import { SdkAnswerRunner, type AnswerRunner } from '../agent/SdkAnswerRunner';
 import { MasAnswerRunner } from '../agent/MasAnswerRunner';
@@ -15,8 +16,17 @@ import { ClaudeOrchestrationJudge, type OrchestrationJudge } from '../reviewer/O
 import { AgentSdkStructuredModel } from '../reviewer/AgentSdkStructuredModel';
 import { loadGrader } from '../reviewer/loadGrader';
 import { ReportWriter, newRunId } from '../report/ReportWriter';
-import { detectClaudeCredentials, type ClaudeCredentialStatus } from '../agent/auth';
+import {
+  detectClaudeCredentials,
+  type ClaudeCredentialStatus,
+  isQuotaOrAuthError,
+  isAuthError,
+  isQuotaError,
+  LOGIN_INSTRUCTIONS,
+  QUOTA_INSTRUCTIONS,
+} from '../agent/auth';
 import { normalizeModelName } from '../cli';
+import { effectiveVerdict } from '../compare/verdict';
 
 export interface RunConfig {
   evalDir: string;
@@ -49,7 +59,10 @@ export interface RunSummary {
   partial: number;
   fail: number;
   error: number;
+  aborted?: boolean;
+  abortReason?: string;
 }
+
 
 type Logger = (msg: string) => void;
 
@@ -79,6 +92,52 @@ export interface RunDeps {
   judge: Judge;
 }
 
+async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s while ${label}`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([fn(), timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+class CachedPromptSource implements PromptSource {
+  private listCache?: Promise<McpPromptInfo[]>;
+  private textCache = new Map<string, Promise<string>>();
+
+  constructor(private readonly inner: PromptSource) {}
+
+  list(): Promise<McpPromptInfo[]> {
+    if (!this.listCache) {
+      this.listCache = this.inner.list();
+    }
+    return this.listCache;
+  }
+
+  getText(name: string, args?: Record<string, string>): Promise<string> {
+    const key = `${name}:${JSON.stringify(args ?? {})}`;
+    let p = this.textCache.get(key);
+    if (!p) {
+      p = this.inner.getText(name, args);
+      this.textCache.set(key, p);
+    }
+    return p;
+  }
+
+  serverVersion() {
+    return this.inner.serverVersion();
+  }
+
+  close(): Promise<void> {
+    return this.inner.close();
+  }
+}
+
 export async function runSuite(
   cfg: RunConfig,
   log: Logger = (m) => console.error(m),
@@ -92,7 +151,8 @@ export async function runSuite(
   if (questions.length === 0) throw new UserError('No questions matched the run selection.');
 
   mkdirSync(cfg.sandboxDir, { recursive: true });
-  const prompts = deps.prompts ?? new McpPrompts(cfg.mcp);
+  const rawPrompts = deps.prompts ?? new McpPrompts(cfg.mcp);
+  const prompts = new CachedPromptSource(rawPrompts);
   const orchestrationMode = cfg.evalIntent === 'orchestration';
   // Active grader = the orchestration rubric for Mode 3, else the answer-quality rubric.
   const graderPath = orchestrationMode ? cfg.orchestrationGraderPath : cfg.graderPath;
@@ -161,19 +221,37 @@ export async function runSuite(
     const t0 = Date.now();
     let result: EvalResult;
     try {
-      const bundle = await produce(q);
+      const bundle = await withTimeout(() => produce(q), 180_000, `answering ${q.category}.${q.id}`);
       if (!resolvedWorkerModel && typeof bundle.providerMeta?.resolvedModel === 'string') {
         resolvedWorkerModel = bundle.providerMeta.resolvedModel;
       }
       result = orchestrationMode
-        ? await gradeOrchestration(q, bundle, orchJudge!, Date.now() - t0, {
-            maxReviewRounds: cfg.mas!.tuning.maxReviewRounds,
-            orchestratorMaxTurns: cfg.mas!.tuning.orchestratorMaxTurns,
-          })
-        : await gradeOne(q, bundle, judge, Date.now() - t0);
+        ? await withTimeout(
+            () =>
+              gradeOrchestration(q, bundle, orchJudge!, Date.now() - t0, {
+                maxReviewRounds: cfg.mas!.tuning.maxReviewRounds,
+                orchestratorMaxTurns: cfg.mas!.tuning.orchestratorMaxTurns,
+              }),
+            120_000,
+            `grading orchestration ${q.category}.${q.id}`,
+          )
+        : await withTimeout(
+            () => gradeOne(q, bundle, judge, Date.now() - t0),
+            120_000,
+            `grading ${q.category}.${q.id}`,
+          );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       result = errorResult(q, msg, Date.now() - t0);
+      results.push(result);
+      log(`[${n}/${questions.length}] ${q.category}.${q.id} → ${result.verdict.verdict}`);
+      if (isQuotaOrAuthError(msg)) {
+        log(`\n[ABORT] Fatal quota or authentication failure on ${q.category}.${q.id}: ${msg}`);
+        if (isAuthError(msg)) log(LOGIN_INSTRUCTIONS);
+        if (isQuotaError(msg)) log(QUOTA_INSTRUCTIONS);
+        break;
+      }
+      continue;
     }
     results.push(result);
     log(`[${n}/${questions.length}] ${q.category}.${q.id} → ${result.verdict.verdict}`);
@@ -214,22 +292,31 @@ export async function runSuite(
   if (cfg.merge) {
     runDirs.push(writer.write(cfg.evalDir, meta, results).runDir);
   } else {
-    // One run id per CATEGORY — computed up front, so the per-category writes can never collide on
-    // the same second and clobber each other's results.json.
+    const promptList = await prompts.list().catch(() => []);
+    const promptInfoMap = new Map(promptList.map((p) => [p.name, p]));
     for (const [cat, list] of groupByCategory(results)) {
       const runId = `${newRunId(answerModelLabel, sutSha)}__${cat}`;
-      runDirs.push(writer.write(cfg.evalDir, { ...meta }, list, runId).runDir);
+      const catPlaybooks = [...new Set(list.map((r) => r.question.playbook).filter((p): p is string => Boolean(p)))];
+      const catSysPrompt =
+        catPlaybooks.length > 0 && promptInfoMap.get(catPlaybooks[0])?.systemPrompt
+          ? promptInfoMap.get(catPlaybooks[0])!.systemPrompt!
+          : (systemPrompt ? SYSTEM_PROMPT_NAME : null);
+      const catMeta = { ...meta, systemPromptName: catSysPrompt, playbooks: catPlaybooks };
+      runDirs.push(writer.write(cfg.evalDir, catMeta, list, runId).runDir);
     }
   }
 
-  const tally = { total: results.length, pass: 0, partial: 0, fail: 0, error: 0 };
-  for (const r of results) {
-    if (r.verdict.verdict === 'PASS') tally.pass++;
-    else if (r.verdict.verdict === 'PARTIAL') tally.partial++;
-    else if (r.verdict.verdict === 'FAIL') tally.fail++;
-    else tally.error++;
-  }
-  return { runDirs, ...tally };
+  const summary: RunSummary = {
+    runDirs,
+    total: results.length,
+    pass: results.filter((r) => effectiveVerdict(r) === 'PASS').length,
+    partial: results.filter((r) => effectiveVerdict(r) === 'PARTIAL').length,
+    fail: results.filter((r) => effectiveVerdict(r) === 'FAIL').length,
+    error: results.filter((r) => effectiveVerdict(r) === 'ERROR').length,
+    aborted: results.length < questions.length,
+    abortReason: results.length < questions.length ? 'Quota, authentication, or fatal error encountered' : undefined,
+  };
+  return summary;
 }
 
 export function selectQuestions(cfg: RunConfig): EvalQuestion[] {
@@ -295,7 +382,19 @@ function sanitizeSha(v: string | undefined): string {
 function agentSdkVersion(): string {
   try {
     const require = createRequire(import.meta.url);
-    return (require('@anthropic-ai/claude-agent-sdk/package.json') as { version: string }).version;
+    const entry = require.resolve('@anthropic-ai/claude-agent-sdk');
+    let dir = dirname(entry);
+    while (dir && dir !== dirname(dir)) {
+      const pkgPath = join(dir, 'package.json');
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: string; version?: string };
+        if (pkg.name === '@anthropic-ai/claude-agent-sdk' && typeof pkg.version === 'string') {
+          return pkg.version;
+        }
+      }
+      dir = dirname(dir);
+    }
+    return 'unknown';
   } catch {
     return 'unknown';
   }

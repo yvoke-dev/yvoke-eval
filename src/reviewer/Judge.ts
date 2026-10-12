@@ -38,6 +38,30 @@ export interface StructuredModel {
 }
 
 /**
+ * Derive overall verdict deterministically from dimension scores:
+ * - If any dimension is FAIL -> FAIL
+ * - Else if any dimension is PARTIAL -> PARTIAL
+ * - Else if all dimensions are PASS or NA -> PASS
+ * - Else -> ERROR or FAIL
+ */
+export function deriveVerdictFromDimensions(
+  dimensions: Record<string, string>,
+  rawVerdict?: string,
+): string {
+  const vals = Object.values(dimensions);
+  const nonNa = vals.filter((v) => v !== 'NA');
+  // When no specific dimension evaluations are present, retain the raw verdict if valid
+  if (nonNa.length === 0) {
+    return rawVerdict && rawVerdict !== 'ERROR' ? rawVerdict : (rawVerdict ?? 'ERROR');
+  }
+  if (vals.some((v) => v === 'FAIL')) return 'FAIL';
+  if (vals.some((v) => v === 'PARTIAL')) return 'PARTIAL';
+  if (nonNa.every((v) => v === 'PASS')) return 'PASS';
+  if (vals.some((v) => v === 'ERROR')) return 'ERROR';
+  return rawVerdict ?? 'FAIL';
+}
+
+/**
  * Map a raw structured verdict object into our Verdict, defaulting anything missing. Tolerant of shape
  * variance (verdict/dimension values sometimes arrive nested), because the Agent SDK judge has no
  * responseSchema binding to guarantee the exact shape.
@@ -47,7 +71,7 @@ export function parseVerdict(raw: unknown, dims: readonly string[] = DIMENSIONS)
     return errorVerdict('unparseable reviewer output');
   }
   const o = raw as Record<string, unknown>;
-  const verdict = pickEnum(o.verdict, ['verdict', 'overall', 'value', 'result', 'label']) ?? 'ERROR';
+  const rawVerdict = pickEnum(o.verdict, ['verdict', 'overall', 'value', 'result', 'label']) ?? 'ERROR';
   const dimsIn =
     o.dimensions && typeof o.dimensions === 'object'
       ? (o.dimensions as Record<string, unknown>)
@@ -56,7 +80,12 @@ export function parseVerdict(raw: unknown, dims: readonly string[] = DIMENSIONS)
   for (const dim of dims) {
     dimensions[dim] = pickEnum(dimsIn[dim], ['score', 'value', 'verdict', 'rating']) ?? 'NA';
   }
-  const reasoning = typeof o.reasoning === 'string' ? o.reasoning : '';
+  const derivedVerdict = deriveVerdictFromDimensions(dimensions, rawVerdict);
+  const verdict = derivedVerdict !== 'ERROR' ? derivedVerdict : rawVerdict;
+  let reasoning = typeof o.reasoning === 'string' ? o.reasoning : '';
+  if (rawVerdict !== 'ERROR' && rawVerdict !== derivedVerdict) {
+    reasoning = `[Verdict derived in code: ${derivedVerdict} (model returned ${rawVerdict})]\n${reasoning}`.trim();
+  }
   const evidence = Array.isArray(o.evidence) ? o.evidence.map(String) : [];
   return { verdict, dimensions, reasoning, evidence };
 }
