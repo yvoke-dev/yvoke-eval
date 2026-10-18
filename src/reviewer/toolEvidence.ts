@@ -15,10 +15,10 @@ import type { ToolEvidence, ToolInvocation } from '../agent/AnswerBundle';
  *  verdicts are direct evidence about citation validity. */
 const NON_EVIDENCE_TOOLS = new Set(['ToolSearch', 'AskUserQuestion', 'ask_clarifying_question']);
 
-/** Per-result and whole-block caps. Measured: ~20 KB mean and ~92 KB max per question over an 84-question
- *  run, so these bound the tail without touching the typical case. */
-export const MAX_RESULT_CHARS = 20_000;
-export const MAX_TOTAL_CHARS = 120_000;
+/** Per-result and whole-block caps. A 10-chunk `search_corpus` result is typically 25–45 KB, so a 20 KB
+ *  per-result cap silently dropped chunks #6–#10 and caused false-negative grounding/citation grades. */
+export const MAX_RESULT_CHARS = 60_000;
+export const MAX_TOTAL_CHARS = 180_000;
 
 export function toEvidence(
   toolCalls: ToolInvocation[],

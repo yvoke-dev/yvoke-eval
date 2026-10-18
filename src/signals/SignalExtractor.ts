@@ -65,16 +65,21 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
 
   const chunkIds = distinct(bundle.retrievedChunkIds ?? []);
 
-  // Only collections whose chunks were actually retrieved count as "retrieved".
-  const retrievedCollections =
+  // Collections whose chunks or graph rows were actually retrieved count as "retrieved".
+  const searchCorpusRetrieved =
     chunkIds.length === 0
       ? []
-      : distinct(
-          bundle.toolCalls
-            .filter((t) => stripPrefix(t.name) === 'search_corpus' && !t.isError)
-            .map(searchCorpusCollection)
-            .filter(isString),
-        );
+      : bundle.toolCalls
+          .filter((t) => stripPrefix(t.name) === 'search_corpus' && !t.isError)
+          .map(searchCorpusCollection)
+          .filter(isString);
+
+  const graphRetrieved = bundle.toolCalls
+    .filter((t) => !t.isError && isGraphToolWithRows(t))
+    .map((t) => collectionArg(t.argumentsJson))
+    .filter(isString);
+
+  const retrievedCollections = distinct([...searchCorpusRetrieved, ...graphRetrieved]);
 
   const mustIncludeMissing = question.mustInclude.filter((s) => !containsNeedle(answer, s));
   if (question.mustIncludeAny && question.mustIncludeAny.length > 0) {
@@ -139,6 +144,25 @@ function searchCorpusCollection(t: ToolInvocation): string | null {
     if (t.resultText.startsWith('Error:')) return null;
   }
   return collectionArg(t.argumentsJson);
+}
+
+/** True when a graph lookup (`search_graph_entities` / `get_graph_neighbors`) returned a markdown table of rows. */
+function isGraphToolWithRows(t: ToolInvocation): boolean {
+  const name = stripPrefix(t.name);
+  if (name !== 'search_graph_entities' && name !== 'get_graph_neighbors') return false;
+  const raw = (t.resultText ?? '').trim();
+  if (!raw) return false;
+  let decoded = raw;
+  if (raw.startsWith('"')) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (typeof parsed === 'string') decoded = parsed;
+    } catch {
+      // keep raw
+    }
+  }
+  if (decoded.startsWith('Error:')) return false;
+  return /(?:^|\n)\s*\|/.test(decoded);
 }
 
 function collectionArg(argsJson: string): string | null {
