@@ -18,7 +18,7 @@ const SIGNALS: Signals = {
 };
 
 describe('parseVerdict', () => {
-  it('maps a full verdict object', () => {
+  it('maps a full verdict object and derives verdict deterministically', () => {
     const v = parseVerdict({
       verdict: 'PASS',
       dimensions: {
@@ -32,9 +32,10 @@ describe('parseVerdict', () => {
       reasoning: 'looks good',
       evidence: ['cited the manual'],
     });
-    expect(v.verdict).toBe('PASS');
+    // completeness: PARTIAL strictly derives overall PARTIAL
+    expect(v.verdict).toBe('PARTIAL');
     expect(v.dimensions.completeness).toBe('PARTIAL');
-    expect(v.reasoning).toBe('looks good');
+    expect(v.reasoning).toContain('[Verdict derived in code: PARTIAL (model returned PASS)]');
     expect(v.evidence).toEqual(['cited the manual']);
   });
 
@@ -52,12 +53,12 @@ describe('parseVerdict', () => {
   it('normalizes lower-case and reads nested verdict/dimension shapes', () => {
     const v = parseVerdict({
       verdict: 'pass',
-      dimensions: { routing: { score: 'pass' }, grounding: 'PARTIAL' },
+      dimensions: { routing: { score: 'pass' }, grounding: 'PASS' },
       reasoning: 'x',
     });
     expect(v.verdict).toBe('PASS');
     expect(v.dimensions.routing).toBe('PASS'); // unwrapped from { score }
-    expect(v.dimensions.grounding).toBe('PARTIAL');
+    expect(v.dimensions.grounding).toBe('PASS');
     expect(v.dimensions.citations).toBe('NA'); // absent → default
   });
 
@@ -83,6 +84,7 @@ describe('buildUserMessage', () => {
     const q = mkQuestion({ bait: null, rubric: 'must name the clients' });
     const msg = buildUserMessage(q, 'Manager, Designer [1]', SIGNALS);
     expect(msg).toContain('expected_collection_contains: Getting Started');
+    expect(msg).toContain('critical: false');
     expect(msg).toContain('rubric: must name the clients');
     expect(msg).toContain('tools_fired: [search_corpus]');
     expect(msg).toContain('answer_has_citations: true');
@@ -99,6 +101,18 @@ describe('buildUserMessage', () => {
 
   it('shows a placeholder for an empty answer', () => {
     expect(buildUserMessage(mkQuestion(), '', SIGNALS)).toContain('(no answer produced)');
+  });
+
+  it('surfaces unverified_citations only when present in signals', () => {
+    const q = mkQuestion();
+    const withUnverified = buildUserMessage(q, 'answer', {
+      ...SIGNALS,
+      unverifiedCitations: ['11111111-1111-1111-1111-111111111111'],
+    });
+    expect(withUnverified).toContain('unverified_citations: [11111111-1111-1111-1111-111111111111]');
+
+    const withoutUnverified = buildUserMessage(q, 'answer', SIGNALS);
+    expect(withoutUnverified).not.toContain('unverified_citations');
   });
 });
 
@@ -130,5 +144,216 @@ describe('ClaudeJudge', () => {
     const v = await judge.review({ question: mkQuestion(), answer: 'a', signals: SIGNALS });
     expect(v.verdict).toBe('ERROR');
     expect(v.reasoning).toContain('boom');
+  });
+
+  it('passes abortController to structuredModel.complete', async () => {
+    let capturedAc: AbortController | undefined;
+    const model: StructuredModel = {
+      async complete(input) {
+        capturedAc = input.abortController;
+        return { verdict: 'PASS', dimensions: {}, reasoning: 'ok' };
+      },
+    };
+    const judge = new ClaudeJudge(model, { model: 'opus', systemPrompt: 'r' });
+    const ac = new AbortController();
+    await judge.review({ question: mkQuestion(), answer: 'a', signals: SIGNALS, abortController: ac });
+    expect(capturedAc).toBe(ac);
+  });
+
+  it('plumbs question.critical to parseVerdict so completeness FAIL drives FAIL instead of PARTIAL', async () => {
+    const model: StructuredModel = {
+      async complete() {
+        return {
+          verdict: 'FAIL',
+          dimensions: { routing: 'PASS', grounding: 'PASS', completeness: 'FAIL' },
+          reasoning: 'missing key facts',
+        };
+      },
+    };
+    const judge = new ClaudeJudge(model, { model: 'opus', systemPrompt: 'r' });
+
+    const nonCrit = await judge.review({
+      question: mkQuestion({ critical: false }),
+      answer: 'a',
+      signals: SIGNALS,
+    });
+    expect(nonCrit.verdict).toBe('PARTIAL');
+
+    const crit = await judge.review({
+      question: mkQuestion({ critical: true }),
+      answer: 'a',
+      signals: SIGNALS,
+    });
+    expect(crit.verdict).toBe('FAIL');
+  });
+});
+
+
+describe('deriveVerdictFromDimensions', () => {
+  it('returns PARTIAL when completeness is FAIL on non-critical questions', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: { routing: 'PASS', grounding: 'PASS', completeness: 'FAIL' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false, // non-critical
+    );
+    expect(v.verdict).toBe('PARTIAL');
+  });
+
+  it('returns FAIL when completeness is FAIL on critical questions', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: { routing: 'PASS', grounding: 'PASS', completeness: 'FAIL' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      true, // critical
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns PARTIAL when routing is FAIL on non-critical questions', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: { routing: 'FAIL', grounding: 'PASS', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false, // non-critical
+    );
+    expect(v.verdict).toBe('PARTIAL');
+  });
+
+  it('returns FAIL when routing is FAIL on critical questions', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: { routing: 'FAIL', grounding: 'PASS', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      true, // critical
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns FAIL when grounding is FAIL regardless of critical status', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'PASS', grounding: 'FAIL', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns FAIL when no_fabrication is FAIL regardless of critical status', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'PASS', no_fabrication: 'FAIL', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns FAIL when stop_rule is FAIL regardless of critical status', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'PASS', stop_rule: 'FAIL', completeness: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('returns PASS when all applicable non-NA dimensions are PASS', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'PASS', grounding: 'PASS', completeness: 'PASS', citations: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('PASS');
+  });
+
+  it('returns ERROR when any dimension is ERROR', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: { routing: 'ERROR', grounding: 'PASS' },
+        reasoning: '',
+      },
+      DIMENSIONS,
+      false,
+    );
+    expect(v.verdict).toBe('ERROR');
+  });
+});
+
+describe('deriveVerdictFromDimensions — orchestration mode (Mode 3)', () => {
+  it('derives FAIL when reviewer_effectiveness is FAIL', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'FAIL',
+        dimensions: {
+          delegation_routing: 'PASS',
+          coordination_termination: 'PASS',
+          reviewer_effectiveness: 'FAIL',
+        },
+        reasoning: '',
+      },
+      ORCH_DIMENSIONS,
+    );
+    expect(v.verdict).toBe('FAIL');
+  });
+
+  it('derives PARTIAL when any dimension is PARTIAL and none is FAIL', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PARTIAL',
+        dimensions: {
+          delegation_routing: 'PASS',
+          coordination_termination: 'PASS',
+          reviewer_effectiveness: 'PARTIAL',
+        },
+        reasoning: '',
+      },
+      ORCH_DIMENSIONS,
+    );
+    expect(v.verdict).toBe('PARTIAL');
+  });
+
+  it('derives PASS when all non-NA dimensions are PASS', () => {
+    const v = parseVerdict(
+      {
+        verdict: 'PASS',
+        dimensions: {
+          delegation_routing: 'PASS',
+          coordination_termination: 'PASS',
+          reviewer_effectiveness: 'PASS',
+        },
+        reasoning: '',
+      },
+      ORCH_DIMENSIONS,
+    );
+    expect(v.verdict).toBe('PASS');
   });
 });

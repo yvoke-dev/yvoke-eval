@@ -26,8 +26,9 @@ Extracted from the in-repo Spring Boot eval IT (`yvoke-web/src/it/java/.../eval`
 - **The grader is owned by the eval content, not the server.** The rubric is named by
   `reviewer.promptFile` in the content repository's config — there is no default, since a rubric is
   knowledge-base specific — and its checksum is pinned into each run's `run_meta.json`
-  (`graderPromptSha`), so verdicts stay attributable. Judge is **Claude by default** (forced
-  structured output); Gemini is an optional cross-family bias-audit provider.
+  (`graderPromptSha`), so verdicts stay attributable. Judge is **Claude** (Agent SDK structured
+  model with defensive JSON extraction and deterministic dimension scoring).
+
 - **All content lives in the content repo:** its `eval/` holds the specs (`eval_specs.yaml` +
   `eval_<category>.md`), `baseline/`, and `runs/`; its `graders/` holds the rubrics. Every relative
   path in `yvoke-eval.yaml` resolves against the directory holding that config.
@@ -51,7 +52,8 @@ The harness answers three different questions, scored differently, at three leve
 
 Both answer modes run end-to-end against a live `localhost:8080` and grade to a full structured
 verdict — **verified** (both smoke-graded PASS), all on `~/.claude` subscription auth (no API key).
-`compare`/`--gate`/`promote` are implemented and tested. 128 offline tests + typecheck green.
+`compare`/`--gate`/`promote` are implemented and tested. 325+ offline tests + typecheck green.
+
 
 - **`single` mode** — one playbook, tools + prompt from MCP, captured to an `AnswerBundle`.
 - **`mas` mode** — orchestrator + specialists + reviewer (per `spike-mas.ts`); retrieval happens
@@ -70,10 +72,10 @@ Implemented:
   non-zero exit on hard regressions, and `promote` (regenerates `baseline/<category>/` + `BASELINE.md`).
 - **Reporting/specs/config:** `EvalSpecParser`, `ReportWriter` (golden-tested), `loadConfig`.
 
-Known caveats: `run_meta.gitSha` is the MCP server version (e.g. `1.0.0`), not a commit; `sdkVersion`
-may read `unknown`; the `mas` composed answer includes some orchestrator narration; the
-`expect:clarify` STOP path is verified in single mode only. Hardening idea: replace the
-prompt-contract judge with an in-process `record_verdict` SDK tool for guaranteed-schema output.
+Known caveats: `run_meta.gitSha` is the MCP server version (e.g. `1.0.0`), not a commit; the `mas`
+composed answer includes some orchestrator narration; the `expect:clarify` STOP path is verified in
+single mode only. Hardening idea: replace the prompt-contract judge with an in-process
+`record_verdict` SDK tool for guaranteed-schema output.
 
 > Baselines recorded before 2026-07-28 ran with the SDK default system prompt — the harness was
 > asking MCP for `default-chat`, which only ever served playbooks, and swallowing the error. They are
@@ -133,30 +135,18 @@ web:
 
 If `web.allowedDomains` is omitted or empty, web tool calls fail closed in `canUseTool`, ensuring eval runs only contact approved endpoints matching production policy.
 
-### Caveat — a replayed answer can be scored as if the model had run
+### Run Provenance & Metadata (`run_meta.json`)
 
-Yvoke reaches Gemini through a Cloudflare AI Gateway, and **caching is on at the gateway** — enabled
-in the dashboard, not in code. It caches streaming responses too. The cache key is
-`SHA-256(provider + endpoint + model + auth header + full request body)`, so organic chat rarely
-repeats — but **this harness replays a fixed question set, so it sends byte-identical first turns by
-design.** That is exactly the shape the cache is built for.
+Every evaluation run and category writes a `run_meta.json` containing complete provenance of the code, content, models, and prompts used during evaluation:
 
-When it hits, the gateway returns the stored answer and **the model never executes**. The run then
-scores a replayed answer, and its cost reads near-zero for work that would really have been billed.
-Nothing prevents this today: `yvoke-web` records the outcome faithfully
-(`llm_call_logs.gateway_cache_status`, `cost_avoided`, `gateway_log_id`) but **never sends
-`cf-aig-skip-cache`**, and this harness has no way to ask for it.
-
-Two practical consequences:
-
-- **Before trusting a comparison**, check what share of that run's calls were replayed.
-  `gateway_cache_status` is on every `llm_call_logs` row and eval traffic is identifiable by
-  `source`. A run with a material HIT share is measuring the cache, not the model.
-- **Re-running the same suite is the worst case, not the safest.** The second run is the one likely
-  to be served from cache, so a score that looks stable across repeated runs is weak evidence.
-
-If this proves to bite, the fix is two-sided: the harness identifies its traffic, and `yvoke-web`
-forwards `cf-aig-skip-cache: true` for it. Neither half exists yet.
+- `scoringVersion`: Eval scoring and extraction contract version (e.g. `'2.2'`).
+- `harnessGitSha`: Git commit hash of `yvoke-eval` (with `-dirty` suffix if uncommitted modifications or untracked source files exist).
+- `contentGitSha`: Git commit hash of the external content repo (`cfg.evalDir`).
+- `systemPromptSha` and `systemPromptName`: Scalar SHA-256 hash and designated prompt name. Set to `null` when a run or category used multiple prompts.
+- `systemPromptFallback`: Boolean emitted on every run, category metadata, and `playbookPrompts` entry (`true` if any question fell back to `default-chat` because the designated prompt was empty or failed, `false` when nothing fell back).
+- `playbookPrompts`: Map of prompt metadata per playbook (including `_no_playbook`) emitted in multi-playbook runs or mixed categories, used uniformly for both merged and category metadata.
+- `_no_playbook`: Public documented key in `playbookPrompts` representing questions evaluated without a playbook (running under `default-chat`).
+- `systemPromptShas` and `systemPromptVaried`: `systemPromptShas: string[]` and `systemPromptVaried: true` are emitted only when questions within a playbook or suite ran under multiple distinct prompts (when prompts varied).
 
 ### Shell wrappers
 

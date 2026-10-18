@@ -17,6 +17,7 @@ describe('gradeOrchestration', () => {
   it('assembles an EvalResult with orchestrationSignals + orchestrationVerdict AND a degenerate signals', async () => {
     const bundle = mkBundle({
       answer: 'The clients are Manager and Designer [1].',
+      retrievedChunkIds: ['orch-chunk-1'],
       promptTokens: 8000,
       completionTokens: 1200,
       totalTokens: 9200,
@@ -38,6 +39,7 @@ describe('gradeOrchestration', () => {
     // degenerate answer-signals so compare/promote's effectiveVerdict never throws
     expect(r.signals.mustNotIncludePresent).toEqual([]);
     expect(r.signals.retrievedChunkCount).toBe(0);
+    expect(r.retrievedChunkIds).toEqual(['orch-chunk-1']);
     expect(r.promptTokens).toBe(8000);
     expect(r.latencyMs).toBe(999);
     expect(r.error).toBeNull();
@@ -55,11 +57,12 @@ describe('gradeOrchestration', () => {
         throw new Error('orch judge exploded');
       },
     };
-    const r = await gradeOrchestration(mkQuestion(), mkBundle({ answer: 'x' }), throwing, 5, CAPS);
+    const r = await gradeOrchestration(mkQuestion(), mkBundle({ answer: 'x', retrievedChunkIds: ['orch-err-chunk-1'] }), throwing, 5, CAPS);
     expect(r.verdict.verdict).toBe('ERROR');
     expect(r.error).toContain('orch judge exploded');
     expect(r.signals.mustNotIncludePresent).toEqual([]);
     expect(r.totalTokens).toBe(0);
+    expect(r.retrievedChunkIds).toEqual(['orch-err-chunk-1']);
   });
 });
 

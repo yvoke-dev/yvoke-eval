@@ -2,6 +2,7 @@ import type { EvalQuestion, Signals, Verdict } from '../types';
 import type { ToolEvidence } from '../agent/AnswerBundle';
 import { errorVerdict } from '../types';
 import { DIMENSIONS, VERDICT_SCHEMA, VERDICT_CONTRACT } from './VerdictSchema';
+import { ORCH_DIMENSIONS } from './OrchestrationVerdictSchema';
 import { buildUserMessage } from './buildUserMessage';
 
 export interface JudgeRequest {
@@ -11,6 +12,7 @@ export interface JudgeRequest {
   /** Verbatim tool results the model received. Lets the judge resolve claims that carry no chunk id
    *  (graph/section reads) instead of treating them as ungrounded. Omitted → evidence block absent. */
   evidence?: ToolEvidence[];
+  abortController?: AbortController;
 }
 
 /** The LLM-as-judge. Claude by default (ClaudeJudge); Gemini optional for cross-family audits. */
@@ -34,7 +36,57 @@ export interface StructuredModel {
     maxTokens: number;
     toolName: string;
     schema: unknown;
+    abortController?: AbortController;
   }): Promise<unknown>;
+}
+
+/**
+ * Derive overall verdict deterministically from dimension scores matching rubric:
+ * - Orchestration (Mode 3): FAIL if any dimension is FAIL; PASS if all non-NA are PASS; PARTIAL otherwise.
+ * - Answer-quality (Mode 1 & 2): FAIL if any hard constraint fails (stop_rule FAIL, no_fabrication FAIL,
+ *   grounding FAIL, or on critical questions completeness/routing FAIL). PASS only if all non-NA are PASS.
+ *   PARTIAL otherwise.
+ */
+export function deriveVerdictFromDimensions(
+  dimensions: Record<string, string>,
+  rawVerdict?: string,
+  isCritical: boolean = false,
+  dims: readonly string[] = DIMENSIONS,
+): string {
+  const vals = Object.values(dimensions);
+  const nonNa = vals.filter((v) => v !== 'NA');
+  // When no specific dimension evaluations are present, retain the raw verdict if valid
+  if (nonNa.length === 0) {
+    return rawVerdict && rawVerdict !== 'ERROR' ? rawVerdict : (rawVerdict ?? 'ERROR');
+  }
+
+  // Check if evaluating orchestration dimensions (Mode 3):
+  const isOrch =
+    dims.some((d) => (ORCH_DIMENSIONS as readonly string[]).includes(d)) ||
+    Object.keys(dimensions).some((d) => (ORCH_DIMENSIONS as readonly string[]).includes(d));
+
+  if (isOrch) {
+    if (vals.some((v) => v === 'FAIL')) return 'FAIL';
+    if (vals.some((v) => v === 'ERROR')) return 'ERROR';
+    if (nonNa.every((v) => v === 'PASS')) return 'PASS';
+    return 'PARTIAL';
+  }
+
+  // Hard constraints from answer-quality rubric:
+  if (
+    dimensions['stop_rule'] === 'FAIL' ||
+    dimensions['no_fabrication'] === 'FAIL' ||
+    dimensions['grounding'] === 'FAIL' ||
+    (isCritical && (dimensions['completeness'] === 'FAIL' || dimensions['routing'] === 'FAIL'))
+  ) {
+    return 'FAIL';
+  }
+
+  if (vals.some((v) => v === 'ERROR')) return 'ERROR';
+  if (nonNa.every((v) => v === 'PASS')) return 'PASS';
+
+  // Non-critical gaps in completeness/routing/citations or any PARTIAL -> PARTIAL
+  return 'PARTIAL';
 }
 
 /**
@@ -42,12 +94,16 @@ export interface StructuredModel {
  * variance (verdict/dimension values sometimes arrive nested), because the Agent SDK judge has no
  * responseSchema binding to guarantee the exact shape.
  */
-export function parseVerdict(raw: unknown, dims: readonly string[] = DIMENSIONS): Verdict {
+export function parseVerdict(
+  raw: unknown,
+  dims: readonly string[] = DIMENSIONS,
+  isCritical: boolean = false,
+): Verdict {
   if (!raw || typeof raw !== 'object') {
     return errorVerdict('unparseable reviewer output');
   }
   const o = raw as Record<string, unknown>;
-  const verdict = pickEnum(o.verdict, ['verdict', 'overall', 'value', 'result', 'label']) ?? 'ERROR';
+  const rawVerdict = pickEnum(o.verdict, ['verdict', 'overall', 'value', 'result', 'label']) ?? 'ERROR';
   const dimsIn =
     o.dimensions && typeof o.dimensions === 'object'
       ? (o.dimensions as Record<string, unknown>)
@@ -56,7 +112,12 @@ export function parseVerdict(raw: unknown, dims: readonly string[] = DIMENSIONS)
   for (const dim of dims) {
     dimensions[dim] = pickEnum(dimsIn[dim], ['score', 'value', 'verdict', 'rating']) ?? 'NA';
   }
-  const reasoning = typeof o.reasoning === 'string' ? o.reasoning : '';
+  const derivedVerdict = deriveVerdictFromDimensions(dimensions, rawVerdict, isCritical, dims);
+  const verdict = derivedVerdict;
+  let reasoning = typeof o.reasoning === 'string' ? o.reasoning : '';
+  if (rawVerdict !== 'ERROR' && rawVerdict !== derivedVerdict) {
+    reasoning = `[Verdict derived in code: ${derivedVerdict} (model returned ${rawVerdict})]\n${reasoning}`.trim();
+  }
   const evidence = Array.isArray(o.evidence) ? o.evidence.map(String) : [];
   return { verdict, dimensions, reasoning, evidence };
 }
@@ -104,8 +165,9 @@ export class ClaudeJudge implements Judge {
         maxTokens: this.opts.maxTokens ?? 2048,
         toolName: 'record_verdict',
         schema: VERDICT_SCHEMA,
+        abortController: req.abortController,
       });
-      return parseVerdict(raw);
+      return parseVerdict(raw, DIMENSIONS, req.question.critical);
     } catch (e) {
       return errorVerdict(`reviewer call failed: ${e instanceof Error ? e.message : String(e)}`);
     }

@@ -67,6 +67,7 @@ export class ReportWriter {
     const exists = existsSync(overviewPath);
 
     const mode = String(meta['evalIntent'] ?? meta['answerProvider'] ?? 'single');
+    const playbookVersion = formatPlaybookVersion(meta['playbookVersion']);
     const answerModel = formatModelDisplay(String(meta['answerModel'] ?? 'model'), meta['resolvedAnswerModel']);
     const reviewerModel = formatModelDisplay(String(meta['reviewerModel'] ?? 'reviewer'), meta['resolvedReviewerModel']);
     const masReviewer = meta['masReviewerModel']
@@ -99,14 +100,25 @@ export class ReportWriter {
     if (!exists) {
       content += '# Evaluation Benchmark Overview\n\n';
       content += 'Cumulative record of evaluation runs across single-agent and multi-agent suites.\n\n';
-      content += '| Date (UTC) | Run ID | Mode | Category / Scope | Worker Model | Thinking | Judge Model | MAS Reviewer | Pass Rate | Critical Pass | Latency |\n';
-      content += '|---|---|---|---|---|---|---|---|---|---|---|\n';
+      content += '| Date (UTC) | Run ID | Mode | Playbook Version | Category / Scope | Worker Model | Thinking | Judge Model | MAS Reviewer | Pass Rate | Critical Pass | Latency |\n';
+      content += '|---|---|---|---|---|---|---|---|---|---|---|---|\n';
     }
 
-    content += `| ${meta['timestamp']} | \`${runId}\` | ${mode} | ${catStr} (${results.length} Qs) | ${answerModel} | ${thinkingLevel} | ${reviewerModel} | ${masReviewer} | ${passRate} | ${critRate} | ${latStr} |\n`;
+    content += `| ${meta['timestamp']} | \`${runId}\` | ${mode} | ${playbookVersion} | ${catStr} (${results.length} Qs) | ${answerModel} | ${thinkingLevel} | ${reviewerModel} | ${masReviewer} | ${passRate} | ${critRate} | ${latStr} |\n`;
 
     appendFileSync(overviewPath, content, 'utf8');
   }
+}
+
+export function formatPlaybookVersion(version: unknown): string {
+  if (typeof version === 'number' && Number.isInteger(version) && version >= 1) {
+    return `v${version}`;
+  }
+  if (typeof version === 'string' && version.trim().length > 0) {
+    const trimmed = version.trim();
+    return /^v\d+$/i.test(trimmed) ? trimmed : /^\d+$/.test(trimmed) ? `v${trimmed}` : trimmed;
+  }
+  return '—';
 }
 
 /** Format a configured model alias with its concrete resolved version, e.g. `sonnet (claude-sonnet-5)`. */
@@ -147,6 +159,7 @@ export function renderSummary(meta: Record<string, unknown>, results: EvalResult
   }
 
   const mode = String(meta['evalIntent'] ?? meta['answerProvider'] ?? 'single');
+  const playbookVersion = formatPlaybookVersion(meta['playbookVersion']);
   const answerModel = formatModelDisplay(String(meta['answerModel'] ?? 'model'), meta['resolvedAnswerModel']);
   const reviewerModel = formatModelDisplay(String(meta['reviewerModel'] ?? 'reviewer'), meta['resolvedReviewerModel']);
   const masReviewer = meta['masReviewerModel']
@@ -157,6 +170,9 @@ export function renderSummary(meta: Record<string, unknown>, results: EvalResult
   let sb = '# Eval run summary\n\n';
   sb += `- timestamp: ${meta['timestamp']}  UTC\n`;
   sb += `- mode: \`${mode}\`\n`;
+  if (playbookVersion !== '—') {
+    sb += `- playbook version: \`${playbookVersion}\`\n`;
+  }
   sb += `- answer model: \`${answerModel}\` (thinking: \`${thinkingLevel}\`)\n`;
   sb += `- reviewer model: \`${reviewerModel}\`\n`;
   if (masReviewer !== '—') {
@@ -196,7 +212,10 @@ export function renderCategoryReport(category: string, results: EvalResult[]): s
     sb += `## ${r.question.id} — ${r.question.question}\n\n`;
     sb += `**Verdict:** ${r.verdict.verdict}  ${JSON.stringify(r.verdict.dimensions)}\n\n`;
     sb += `**Reasoning:** ${r.verdict.reasoning}\n\n`;
-    sb += `**Signals:** tools=${JSON.stringify(r.signals.toolsFired)} retrievedCollections=${JSON.stringify(r.signals.retrievedCollections)} citations=${r.signals.hasCitations}\n\n`;
+    const unverifiedStr = r.signals.unverifiedCitations?.length
+      ? ` unverifiedCitations=${JSON.stringify(r.signals.unverifiedCitations)}`
+      : '';
+    sb += `**Signals:** tools=${JSON.stringify(r.signals.toolsFired)} retrievedCollections=${JSON.stringify(r.signals.retrievedCollections)} citations=${r.signals.hasCitations}${unverifiedStr}\n\n`;
     if (r.error) {
       sb += `**Run error:** ${r.error}\n\n`;
     }

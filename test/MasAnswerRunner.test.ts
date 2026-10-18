@@ -20,8 +20,21 @@ describe('assembleMasBundle', () => {
     expect(b.orchestration).toBe(trace); // trace still attached on the clarify branch
   });
 
-  it('does NOT trigger clarify when a real answer is present', () => {
-    const b = assembleMasBundle(mkBundle({ answer: 'real answer' }), trace, { question: 'q', options: [] });
+  it('triggers clarify when expectBehavior is clarify, overriding post-denial prose and saving rawAnswer', () => {
+    const b = assembleMasBundle(mkBundle({ answer: 'post denial prose' }), trace, { question: 'q', options: [] }, 'clarify');
+    expect(b.answer).toBe('<clarifying-question>q</clarifying-question>');
+    expect(b.rawAnswer).toBe('post denial prose');
+    expect(b.orchestration).toBe(trace);
+  });
+
+  it('preserves answer when expectBehavior is answer and answer is non-empty', () => {
+    const b = assembleMasBundle(mkBundle({ answer: 'full answer' }), trace, { question: 'q', options: [] }, 'answer');
+    expect(b.answer).toBe('full answer');
+    expect(b.orchestration).toBe(trace);
+  });
+
+  it('does NOT trigger clarify when clarify is undefined', () => {
+    const b = assembleMasBundle(mkBundle({ answer: 'real answer' }), trace, undefined);
     expect(b.answer).toBe('real answer');
     expect(b.orchestration).toBe(trace);
   });
@@ -109,4 +122,9 @@ describe('MasAnswerRunner.run — the enforcement is actually wired', () => {
   it('records whether the nudge was needed, so reviewRounds can be read correctly', () => {
     expect(src).toMatch(/reviewEnforced:\s*enforced/);
   });
+
+  it('forwards opts.abortController to SDK options', () => {
+    expect(src).toMatch(/abortController:\s*opts\?\.abortController/);
+  });
 });
+

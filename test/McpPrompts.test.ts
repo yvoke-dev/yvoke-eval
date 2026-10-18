@@ -98,4 +98,28 @@ describe('parsePromptInfo — metadata parsing', () => {
     });
     expect(info2.systemPrompt).toBeUndefined();
   });
+
+  it('parses integer version from _meta.version and meta.version', () => {
+    expect(
+      parsePromptInfo({
+        name: 'playbook-v2',
+        _meta: { version: 2 },
+      }).version,
+    ).toBe(2);
+
+    expect(
+      parsePromptInfo({
+        name: 'playbook-v3',
+        meta: { version: 3 },
+      }).version,
+    ).toBe(3);
+
+    expect(
+      parsePromptInfo({
+        name: 'playbook-no-version',
+        _meta: {},
+      }).version,
+    ).toBeUndefined();
+  });
 });
+

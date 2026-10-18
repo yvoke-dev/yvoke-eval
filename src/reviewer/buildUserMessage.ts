@@ -22,6 +22,7 @@ export function buildUserMessage(
   out.push(`playbook: ${q.playbook}`);
   out.push(`question: ${q.question}`);
   out.push(`expected_behavior: ${q.expect}   (answer|clarify|redirect|refuse)`);
+  out.push(`critical: ${q.critical}`);
   if (q.targetTopic != null) out.push(`expected_collection_contains: ${q.targetTopic}`);
   if (q.bait != null) out.push(`fabrication_bait (MUST NOT be described as real): ${q.bait}`);
   out.push(`citations_required: ${q.citationsRequired}`);
@@ -37,6 +38,9 @@ export function buildUserMessage(
   out.push(`must_not_include_present: ${fmtList(s.mustNotIncludePresent)}`);
   out.push(`expected_tools_missing: ${fmtList(s.expectedToolsMissing)}`);
   out.push(`answer_has_citations: ${s.hasCitations}`);
+  if (s.unverifiedCitations && s.unverifiedCitations.length > 0) {
+    out.push(`unverified_citations: ${fmtList(s.unverifiedCitations)}`);
+  }
 
   out.push('');
   out.push('## Model answer to grade');

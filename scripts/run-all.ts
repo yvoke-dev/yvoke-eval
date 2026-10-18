@@ -14,13 +14,15 @@
  *   npm run eval:all -- --config $CFG --promote ./eval/baseline-sdk-single
  *   npm run eval:all -- --config $CFG --from ts_databases --continue
  */
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, resolveSuite } from '../src/config/loadConfig';
 import { EvalSpecParser } from '../src/specs/EvalSpecParser';
+import { resolveEvalIntent } from '../src/cli';
+
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(repoRoot, 'src', 'cli.ts');
@@ -59,7 +61,8 @@ function main(): void {
     ? (cfg.evalDir ?? './eval')
     : path.join(contentRoot, cfg.evalDir ?? './eval');
 
-  const categories = selectCategories(evalDir, values.only, values.from);
+  const evalIntent = resolveEvalIntent(values, cfg);
+  const categories = selectCategories(evalDir, evalIntent, values.only, values.from);
   if (categories.length === 0) throw new Error(`No categories selected from ${evalDir}.`);
 
   console.error(`${categories.length} categor${categories.length === 1 ? 'y' : 'ies'} from ${evalDir}:`);
@@ -103,8 +106,12 @@ function cli(args: string[], values: Record<string, unknown>): boolean {
 }
 
 /** Spec order is the suite's own order, so a sweep runs in the order the author listed. */
-function selectCategories(evalDir: string, only?: string, from?: string): string[] {
-  const all = [...new Set(new EvalSpecParser(evalDir).parse().map((q) => q.category))];
+export function selectCategories(evalDir: string, evalIntent: string, only?: string, from?: string): string[] {
+  const allQuestions = new EvalSpecParser(evalDir).parse();
+  const applicable = evalIntent === 'orchestration'
+    ? allQuestions.filter((q) => q.category === 'orchestration_ie' || q.expectedSpecialists !== undefined)
+    : allQuestions.filter((q) => q.category !== 'orchestration_ie' && q.expectedSpecialists === undefined);
+  const all = [...new Set(applicable.map((q) => q.category))];
 
   let picked = all;
   if (only) {
@@ -122,7 +129,7 @@ function selectCategories(evalDir: string, only?: string, from?: string): string
 }
 
 /** Newest run directory whose id ends in `__<category>` (how runSuite names per-category runs). */
-function latestRunFor(evalDir: string, category: string): string | null {
+export function latestRunFor(evalDir: string, category: string): string | null {
   const runsDir = path.join(evalDir, 'runs');
   if (!existsSync(runsDir)) return null;
   const matches = readdirSync(runsDir)
@@ -132,7 +139,7 @@ function latestRunFor(evalDir: string, category: string): string | null {
   return matches[0]?.d ?? null;
 }
 
-function report(results: { category: string; ok: boolean; promoted: boolean }[], planned: number, promoting: boolean): void {
+export function report(results: { category: string; ok: boolean; promoted: boolean }[], planned: number, promoting: boolean): void {
   const done = results.filter((r) => r.ok).length;
   console.error(`\n═══ ${done}/${planned} categories succeeded ═══`);
   for (const r of results) {
@@ -144,9 +151,25 @@ function report(results: { category: string; ok: boolean; promoted: boolean }[],
   if (skipped > 0) console.error(`  (${skipped} not attempted)`);
 }
 
-try {
-  main();
-} catch (e) {
-  console.error(e instanceof Error ? e.message : String(e));
-  process.exit(1);
+function isEntryPoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  const self = fileURLToPath(import.meta.url);
+  const invoked = path.resolve(argv1);
+  if (invoked === self) return true;
+  try {
+    return realpathSync(invoked) === realpathSync(self);
+  } catch {
+    return false;
+  }
 }
+
+if (isEntryPoint()) {
+  try {
+    main();
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+}
+

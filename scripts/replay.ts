@@ -15,12 +15,21 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { EvalSpecParser } from '../src/specs/EvalSpecParser';
 import { bundleFromMessages, type StreamMessage } from '../src/agent/capture';
+import type { AnswerBundle } from '../src/agent/AnswerBundle';
+import { extractSignals } from '../src/signals/SignalExtractor';
 import { gradeOne } from '../src/run/grade';
 import { ClaudeJudge } from '../src/reviewer/Judge';
 import { AgentSdkStructuredModel } from '../src/reviewer/AgentSdkStructuredModel';
 import { loadGrader } from '../src/reviewer/loadGrader';
 import { loadConfig, resolveSuite } from '../src/config/loadConfig';
+import { MAX_RESULT_CHARS } from '../src/reviewer/toolEvidence';
 import type { EvalResult } from '../src/types';
+
+function collect(re: RegExp, text: string, into: Set<string>): void {
+  re.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) into.add(m[1]);
+}
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -97,6 +106,65 @@ function loadSessions(transcripts: string): Map<string, StreamMessage[]> {
   return new Map([...best].map(([k, v]) => [k, v.messages]));
 }
 
+export interface OldResultLike {
+  answer?: string | null;
+  rawAnswer?: string | null;
+  toolEvidence?: Array<{ name: string; argumentsJson: string; resultText?: string }>;
+  retrievedChunkIds?: string[];
+  signals?: { unverifiedCitations?: string[] };
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+}
+
+export function buildReplayBundle(o: OldResultLike): { bundle: AnswerBundle; evidenceTruncated: boolean } {
+  let chunkIds: string[];
+  let evidenceTruncated = false;
+  if (Array.isArray(o.retrievedChunkIds)) {
+    chunkIds = o.retrievedChunkIds;
+  } else {
+    const idSet = new Set<string>();
+    for (const e of o.toolEvidence ?? []) {
+      if (e.resultText) {
+        if (e.resultText.length >= MAX_RESULT_CHARS || e.resultText.includes('[…truncated')) {
+          evidenceTruncated = true;
+        }
+        collect(/\[chunk_id=([0-9a-fA-F-]{8,})\]/g, e.resultText, idSet);
+        collect(/\bid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g, e.resultText, idSet);
+      }
+    }
+    chunkIds = [...idSet];
+  }
+  const bundle: AnswerBundle = {
+    answer: o.answer ?? '',
+    rawAnswer: o.rawAnswer ?? undefined,
+    toolCalls: (o.toolEvidence ?? []).map((e) => ({
+      name: e.name,
+      argumentsJson: e.argumentsJson,
+      resultText: e.resultText,
+    })),
+    retrievedChunkIds: chunkIds,
+    promptTokens: o.promptTokens ?? 0,
+    completionTokens: o.completionTokens ?? 0,
+    totalTokens: o.totalTokens ?? 0,
+    providerMeta: o.costUsd != null ? { costUsd: o.costUsd } : {},
+  };
+  return { bundle, evidenceTruncated };
+}
+
+export function adjustReplaySignals(
+  signals: ReturnType<typeof extractSignals>,
+  o: OldResultLike,
+  evidenceTruncated: boolean,
+): void {
+  if (Array.isArray(o.retrievedChunkIds)) {
+    signals.unverifiedCitations = o.signals?.unverifiedCitations;
+  } else if (evidenceTruncated && signals.unverifiedCitations && signals.unverifiedCitations.length > 0) {
+    signals.unverifiedCitations = undefined;
+  }
+}
+
 const USAGE = 'usage: tsx scripts/replay.ts --config <eval-repo>/yvoke-eval.yaml <old-run-dir> [outfile.json]';
 
 async function main(): Promise<void> {
@@ -161,39 +229,107 @@ async function main(): Promise<void> {
     if (done.size > 0) console.error(`resuming: ${done.size} verdict(s) already graded, re-grading the rest`);
   }
 
+  const targetQuestions =
+    oldByKey.size > 0 ? questions.filter((q) => oldByKey.has(`${q.category}.${q.id}`)) : questions;
+
   let n = 0;
-  for (const q of questions) {
+  for (const q of targetQuestions) {
     n++;
-    if (done.has(`${q.category}.${q.id}`)) continue;
-    const messages = sessions.get(q.question.trim());
-    if (!messages) {
-      console.error(`[${n}/${questions.length}] ${q.category}.${q.id} → NO TRANSCRIPT (skipped)`);
-      continue;
-    }
-    const bundle = bundleFromMessages(messages);
+    const o = oldByKey.get(`${q.category}.${q.id}`);
+
     if (process.env.DRY === '1') {
-      // Reconstruction check only — no judge calls. Compares rebuilt signals to the recorded run.
-      const o = oldByKey.get(`${q.category}.${q.id}`);
-      // EvalResult.answer is nullable — an ERROR result in the old run has none, and comparing it
-      // would throw mid-replay rather than reporting a mismatch.
-      const same =
-        o != null &&
-        (o.answer ?? '').trim() === bundle.answer.trim() &&
-        JSON.stringify(o.signals.toolsFired) === JSON.stringify([...new Set(bundle.toolCalls.map((t) => t.name.replace(/^mcp__.+?__/, '')))]);
-      console.error(
-        `[${n}/${questions.length}] ${q.category}.${q.id}  tools=${bundle.toolCalls.length} answer=${bundle.answer.length}ch ${o ? (same ? 'MATCHES recorded' : 'DIFFERS from recorded') : '(not in old run)'}`,
-      );
+      if (o && o.toolEvidence != null && o.answer != null) {
+        console.error(
+          `[${n}/${targetQuestions.length}] ${q.category}.${q.id}  evidence=${o.toolEvidence.length} items answer=${o.answer.length}ch (self-contained from results.json)`,
+        );
+      } else {
+        const messages = sessions.get(q.question.trim());
+        if (!messages) {
+          console.error(`[${n}/${targetQuestions.length}] ${q.category}.${q.id} → NO TRANSCRIPT (skipped)`);
+        } else {
+          const bundle = bundleFromMessages(messages);
+          const same =
+            o != null &&
+            (o.answer ?? '').trim() === bundle.answer.trim() &&
+            JSON.stringify(o.signals.toolsFired) ===
+              JSON.stringify([...new Set(bundle.toolCalls.map((t) => t.name.replace(/^mcp__.+?__/, '')))]);
+          console.error(
+            `[${n}/${targetQuestions.length}] ${q.category}.${q.id}  tools=${bundle.toolCalls.length} answer=${bundle.answer.length}ch ${o ? (same ? 'MATCHES recorded' : 'DIFFERS from recorded') : '(not in old run)'}`,
+          );
+        }
+      }
       continue;
     }
-    const res = await gradeOne(q, bundle, judge, 0);
+
+    let res: EvalResult;
+    if (o && o.toolEvidence != null && o.answer != null) {
+      const { bundle: syntheticBundle, evidenceTruncated } = buildReplayBundle(o);
+      const signals = extractSignals(q, syntheticBundle);
+      adjustReplaySignals(signals, o, evidenceTruncated);
+      const evidence = o.toolEvidence;
+      const verdict = await judge.review({ question: q, answer: o.answer, signals, evidence });
+      const isJudgeError = verdict.verdict === 'ERROR';
+      if (!isJudgeError) {
+        if (signals.mustNotIncludePresent.length > 0) {
+          verdict.verdict = 'FAIL';
+          verdict.dimensions.no_fabrication = 'FAIL';
+          verdict.reasoning = `[Deterministic safety FAIL: must_not_include present: ${signals.mustNotIncludePresent.join(', ')}]\n${verdict.reasoning}`.trim();
+        } else if (q.critical && signals.mustIncludeMissing.length > 0) {
+          verdict.verdict = 'FAIL';
+          verdict.dimensions.completeness = 'FAIL';
+          verdict.reasoning = `[Deterministic completeness FAIL on critical question: missing ${signals.mustIncludeMissing.join(', ')}]\n${verdict.reasoning}`.trim();
+        }
+      }
+      res = {
+        question: q,
+        answer: o.answer,
+        rawAnswer: o.rawAnswer ?? null,
+        signals,
+        verdict,
+        promptTokens: o.promptTokens,
+        completionTokens: o.completionTokens,
+        totalTokens: o.totalTokens,
+        latencyMs: 0,
+        error: isJudgeError ? (verdict.reasoning || 'reviewer call failed') : null,
+        toolEvidence: evidence,
+        costUsd: o.costUsd,
+      };
+    } else {
+      const messages = sessions.get(q.question.trim());
+      if (!messages) {
+        console.error(`[${n}/${targetQuestions.length}] ${q.category}.${q.id} → NO TRANSCRIPT (skipped)`);
+        continue;
+      }
+      const bundle = bundleFromMessages(messages);
+      res = await gradeOne(q, bundle, judge, 0);
+    }
+
     out.push(res);
     const key = `${q.category}.${q.id}`;
     const before = oldByKey.get(key)?.verdict.verdict ?? '—';
     const flag = before !== '—' && before !== res.verdict.verdict ? `  ${before} → ${res.verdict.verdict}` : '';
-    console.error(`[${n}/${questions.length}] ${key} → ${res.verdict.verdict}${flag}`);
+    console.error(`[${n}/${targetQuestions.length}] ${key} → ${res.verdict.verdict}${flag}`);
     writeFileSync(outFile, `${JSON.stringify(out, null, 2)}\n`);
   }
-  console.error(`\nreplayed ${out.length}/${questions.length}; graderSha=${grader.sha}; out=${outFile}`);
+  console.error(`\nreplayed ${out.length}/${targetQuestions.length}; graderSha=${grader.sha}; out=${outFile}`);
 }
 
-void main();
+function isEntryPoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  const self = fileURLToPath(import.meta.url);
+  const invoked = path.resolve(argv1);
+  if (invoked === self) return true;
+  try {
+    return realpathSync(invoked) === realpathSync(self);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  });
+}

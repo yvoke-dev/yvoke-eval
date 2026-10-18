@@ -15,6 +15,7 @@ export interface McpPromptInfo {
   tools?: string[];
   codeExecution?: boolean;
   systemPrompt?: string;
+  version?: number;
 }
 
 export interface McpPromptsOptions {
@@ -56,6 +57,11 @@ export function parsePromptInfo(p: unknown): McpPromptInfo {
     raw.meta?.system_prompt;
   const systemPrompt =
     typeof rawPrompt === 'string' && rawPrompt.trim().length > 0 ? rawPrompt.trim() : undefined;
+  const rawVersion = raw._meta?.version ?? raw.meta?.version;
+  const version =
+    typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion >= 1
+      ? rawVersion
+      : undefined;
 
   return {
     name: raw.name,
@@ -64,6 +70,7 @@ export function parsePromptInfo(p: unknown): McpPromptInfo {
     tools: Array.isArray(meta?.tools) ? (meta!.tools as unknown[]).map(String) : undefined,
     codeExecution: typeof meta?.codeExecution === 'boolean' ? (meta.codeExecution as boolean) : undefined,
     systemPrompt,
+    version,
   };
 }
 

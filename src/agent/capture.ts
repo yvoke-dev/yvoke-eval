@@ -38,6 +38,46 @@ const CHUNK_MARKER = /\[chunk_id=([0-9a-fA-F-]{8,})\]/g;
 // The `id=<uuid>` inside a search_corpus result header: "### kind/title  (score=… id=<uuid> doc_id=…)".
 // `\bid=` never matches inside `doc_id=` (the `_` before `id` blocks the word boundary).
 const SEARCH_RESULT_ID = /\bid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g;
+const UUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
+
+export const ID_COVERAGE = 1.0;
+export const LENGTH_RATIO = 0.5;
+export const LONG = 200;
+
+function uuids(text: string): Set<string> {
+  const set = new Set<string>();
+  UUID_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = UUID_RE.exec(text)) !== null) set.add(m[0].toLowerCase());
+  return set;
+}
+
+function word5Grams(text: string): Set<string> {
+  const words = text.toLowerCase().match(/\w+/g) || [];
+  const grams = new Set<string>();
+  for (let i = 0; i <= words.length - 5; i++) {
+    grams.add(words.slice(i, i + 5).join(' '));
+  }
+  return grams;
+}
+
+export function restated(earlier: string, later: string): boolean {
+  if (earlier.length < LONG || later.length < LONG) return false;
+  if (later.length < LENGTH_RATIO * earlier.length) return false;
+  const eIds = uuids(earlier);
+  if (eIds.size > 0) {
+    const lIds = uuids(later);
+    let match = 0;
+    for (const id of eIds) if (lIds.has(id)) match++;
+    return match / eIds.size >= ID_COVERAGE;
+  }
+  const eGrams = word5Grams(earlier);
+  if (eGrams.size === 0) return false;
+  const lGrams = word5Grams(later);
+  let match = 0;
+  for (const g of eGrams) if (lGrams.has(g)) match++;
+  return match / eGrams.size >= 0.5;
+}
 
 export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
   const textParts: string[] = [];
@@ -64,19 +104,15 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
       }
     } else if (msg.type === 'assistant') {
       if (!isSubAgent && hasSeenResult) {
-        // The draft from the prior turn is superseded by whatever comes back post-review or in
-        // subsequent turns; drop earlier prose so the delivered message isn't "draft + final"
-        // concatenated (mirroring desktop AgentService.maybeContinueForReview).
         textParts.length = 0;
         resultText = undefined;
         hasSeenResult = false;
       }
+
       for (const b of content) {
-        if (b.type === 'text' && typeof b.text === 'string' && b.text) {
-          if (!isSubAgent) textParts.push(b.text); // composed answer = main thread only
-        } else if (b.type === 'tool_use') {
+        if (b.type === 'tool_use') {
           const name = String(b.name);
-          if (DELEGATE_NAMES.has(name)) continue; // delegation, not a retrieval tool
+          if (DELEGATE_NAMES.has(name)) continue;
           const inv: ToolInvocation & { id: string } = {
             id: String(b.id),
             name,
@@ -84,6 +120,20 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
           };
           tools.push(inv);
           byId.set(inv.id, inv);
+        }
+      }
+
+      if (!isSubAgent) {
+        for (const b of content) {
+          if (b.type === 'text' && typeof b.text === 'string' && b.text) {
+            const t = b.text;
+            for (let i = textParts.length - 1; i >= 0; i--) {
+              if (restated(textParts[i], t)) {
+                textParts.splice(i, 1);
+              }
+            }
+            textParts.push(t);
+          }
         }
       }
     } else if (msg.type === 'user') {
@@ -102,7 +152,6 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
       totalOutputTokens += num(u.output_tokens);
       if (typeof msg.result === 'string') resultText = msg.result;
       if (msg.is_error === true) isError = true;
-      // total_cost_usd is cumulative across turns in streaming sessions — keep latest running total
       if (typeof msg.total_cost_usd === 'number') {
         costUsd = msg.total_cost_usd;
       }

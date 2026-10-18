@@ -1,5 +1,6 @@
 import type { EvalQuestion, Signals } from '../types';
 import type { AnswerBundle, ToolInvocation } from '../agent/AnswerBundle';
+import { isClarifyTool } from '../agent/policy';
 
 /**
  * Deterministic, LLM-free signal extraction — derived entirely from the answer text + the SDK/MCP
@@ -43,10 +44,20 @@ const CITATION = new RegExp(
   ].join('|'),
 );
 const SEARCHED_HEADER = /^Searched\s+\*\*(.+?)\*\*/m;
+const UUID_MATCH_REGEX =
+  /(?<![0-9a-fA-F])(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})(?![0-9a-fA-F])/g;
+
+function normalizeUuid(id: string): string {
+  return id.trim().replace(/-/g, '').toLowerCase();
+}
 
 export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Signals {
   const answer = bundle.answer ?? '';
-  const toolsFired = distinct(bundle.toolCalls.map((t) => stripPrefix(t.name)));
+  const toolsFired = distinct(
+    bundle.toolCalls
+      .filter((t) => !t.isError || isClarifyTool(t.name))
+      .map((t) => stripPrefix(t.name)),
+  );
 
   const searchCollections = distinct(
     bundle.toolCalls.map((t) => collectionArg(t.argumentsJson)).filter(isString),
@@ -65,9 +76,16 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
             .filter(isString),
         );
 
-  const hay = answer.toLowerCase();
-  const mustIncludeMissing = question.mustInclude.filter((s) => !hay.includes(s.toLowerCase()));
-  const mustNotIncludePresent = question.mustNotInclude.filter((s) => hay.includes(s.toLowerCase()));
+  const mustIncludeMissing = question.mustInclude.filter((s) => !containsNeedle(answer, s));
+  if (question.mustIncludeAny && question.mustIncludeAny.length > 0) {
+    for (const group of question.mustIncludeAny) {
+      const match = group.some((s) => containsNeedle(answer, s));
+      if (!match) {
+        mustIncludeMissing.push(group.join(' | '));
+      }
+    }
+  }
+  const mustNotIncludePresent = question.mustNotInclude.filter((s) => containsNeedle(answer, s));
   const hasCitations = CITATION.test(answer) || answer.includes('## References');
   // Compared on the bare name, because the trace is stripped of the server prefix while a spec
   // names tools the way a playbook does.
@@ -75,6 +93,30 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
   const expectedToolsMissing = question.expectToolCalled.filter(
     (t) => !firedBare.has(stripPrefix(t).toLowerCase()),
   );
+
+  // Cross-reference cited UUIDs against evidence:
+  const citedUuids = distinct(answer.match(UUID_MATCH_REGEX) ?? []);
+  let unverifiedCitations: string[] | undefined;
+  if (citedUuids.length > 0) {
+    const knownUuids = new Set(chunkIds.map(normalizeUuid));
+    for (const t of bundle.toolCalls) {
+      if (t.isError) continue;
+      const name = stripPrefix(t.name);
+      // verify_citations is an existence checker, not a retriever; its output does not supply new chunk evidence.
+      if (name === 'verify_citations') {
+        continue;
+      }
+
+      if (t.resultText) {
+        const matches = t.resultText.match(UUID_MATCH_REGEX);
+        if (matches) {
+          for (const m of matches) knownUuids.add(normalizeUuid(m));
+        }
+      }
+    }
+    const missing = citedUuids.filter((u) => !knownUuids.has(normalizeUuid(u)));
+    if (missing.length > 0) unverifiedCitations = missing;
+  }
 
   return {
     toolsFired,
@@ -85,6 +127,7 @@ export function extractSignals(question: EvalQuestion, bundle: AnswerBundle): Si
     mustNotIncludePresent,
     expectedToolsMissing,
     hasCitations,
+    ...(unverifiedCitations ? { unverifiedCitations } : {}),
   };
 }
 
@@ -119,3 +162,72 @@ function isString(v: string | null): v is string {
 function distinct<T>(xs: T[]): T[] {
   return [...new Set(xs)];
 }
+
+export function normalizeHaystack(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\\+/g, '/')
+    .replace(/\s+/g, ' ');
+}
+
+export function normalizeNeedle(needle: string): string {
+  return needle
+    .toLowerCase()
+    .replace(/\\+/g, '/')
+    .replace(/\s+/g, ' ');
+}
+
+export function normalizeText(text: string): string {
+  return normalizeNeedle(text);
+}
+
+function stripMarkdown(text: string): string {
+  return text.replace(/[*_`]/g, '');
+}
+
+function isAlphaNumeric(ch: string): boolean {
+  return /[a-z0-9]/.test(ch);
+}
+
+function checkNeedleInText(haystack: string, needle: string): boolean {
+  if (!needle) return true;
+  let idx = haystack.indexOf(needle);
+  if (idx === -1) return false;
+
+  const needleStartsAlpha = isAlphaNumeric(needle[0]);
+  const needleEndsAlpha = isAlphaNumeric(needle[needle.length - 1]);
+
+  while (idx !== -1) {
+    const charBefore = idx > 0 ? haystack[idx - 1] : '';
+    const charAfter = idx + needle.length < haystack.length ? haystack[idx + needle.length] : '';
+
+    const validBefore = !needleStartsAlpha || !isAlphaNumeric(charBefore);
+    let validAfter = !needleEndsAlpha || !isAlphaNumeric(charAfter);
+    if (!validAfter && needleEndsAlpha && charAfter === 's') {
+      const charAfterS = idx + needle.length + 1 < haystack.length ? haystack[idx + needle.length + 1] : '';
+      if (!isAlphaNumeric(charAfterS)) {
+        validAfter = true;
+      }
+    }
+
+    if (validBefore && validAfter) {
+      return true;
+    }
+    idx = haystack.indexOf(needle, idx + 1);
+  }
+
+  return false;
+}
+
+export function containsNeedle(haystack: string, needle: string): boolean {
+  if (checkNeedleInText(normalizeHaystack(haystack), normalizeNeedle(needle))) {
+    return true;
+  }
+  const strippedHay = normalizeHaystack(stripMarkdown(haystack));
+  const strippedNeedle = normalizeNeedle(stripMarkdown(needle));
+  if (strippedNeedle.length > 0 && checkNeedleInText(strippedHay, strippedNeedle)) {
+    return true;
+  }
+  return false;
+}
+

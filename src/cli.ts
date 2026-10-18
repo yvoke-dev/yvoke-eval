@@ -1,11 +1,12 @@
 import { parseArgs } from 'node:util';
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync, readFileSync } from 'node:fs';
+
 import os from 'node:os';
 import path from 'node:path';
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, resolveSuite, type EvalConfig } from './config/loadConfig';
-import { runSuite, selectQuestions, type RunConfig } from './run/runSuite';
+import { runSuite, selectQuestions, type RunConfig, type RunSummary } from './run/runSuite';
 import {
   loadResults,
   loadBaseline,
@@ -29,27 +30,36 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
  * reverting the assignment left the suite green. Threading it makes the refactor's central invariant
  * testable.
  */
-async function main(): Promise<void> {
-  const { values, positionals } = parseArgs({
+export const CLI_OPTIONS = {
+  config: { type: 'string' },
+  suite: { type: 'string' },
+  category: { type: 'string', multiple: true },
+  limit: { type: 'string' },
+  'answer-model': { type: 'string' },
+  'reviewer-model': { type: 'string' },
+  'reviewer-thinking': { type: 'string' },
+  thinking: { type: 'string' },
+  mode: { type: 'string' },
+  eval: { type: 'string' },
+  expect: { type: 'string' },
+  merge: { type: 'boolean' },
+  'dry-run': { type: 'boolean' },
+  run: { type: 'string' },
+  baseline: { type: 'string' },
+  gate: { type: 'boolean' },
+  'gate-critical': { type: 'boolean' },
+} as const;
+
+export function parseCliArgs(args: string[] = process.argv.slice(2)) {
+  return parseArgs({
+    args,
     allowPositionals: true,
-    options: {
-      config: { type: 'string' },
-      suite: { type: 'string' },
-      category: { type: 'string', multiple: true },
-      limit: { type: 'string' },
-      'answer-model': { type: 'string' },
-      'reviewer-model': { type: 'string' },
-      thinking: { type: 'string' },
-      mode: { type: 'string' },
-      eval: { type: 'string' },
-      expect: { type: 'string' },
-      merge: { type: 'boolean' },
-      'dry-run': { type: 'boolean' },
-      run: { type: 'string' },
-      baseline: { type: 'string' },
-      gate: { type: 'boolean' },
-    },
+    options: CLI_OPTIONS,
   });
+}
+
+async function main(): Promise<void> {
+  const { values, positionals } = parseCliArgs();
 
   // --config is CWD-relative, like any other CLI path argument.
   const configPath = values.config ? path.resolve(String(values.config)) : path.join(repoRoot, 'yvoke-eval.yaml');
@@ -81,7 +91,12 @@ async function main(): Promise<void> {
   }
 }
 
-async function cmdRun(cfg: EvalConfig, values: Record<string, unknown>, contentRoot: string): Promise<void> {
+export async function cmdRun(
+  cfg: EvalConfig,
+  values: Record<string, unknown>,
+  contentRoot: string,
+  runSuiteFn: (config: RunConfig) => Promise<RunSummary> = runSuite,
+): Promise<void> {
   const runConfig = toRunConfig(cfg, values, contentRoot);
 
   if (values['dry-run']) {
@@ -101,27 +116,102 @@ async function cmdRun(cfg: EvalConfig, values: Record<string, unknown>, contentR
     `Running ${runConfig.categories.length > 0 ? runConfig.categories.join(',') : 'all categories'} ` +
       `via ${answerLabel}, judge=${runConfig.reviewerModel} against ${runConfig.mcp.serverBaseUrl}`,
   );
-  const summary = await runSuite(runConfig);
+  const summary = await runSuiteFn(runConfig);
+
+  const abortNote = summary.aborted ? ` [ABORTED: ${summary.abortReason ?? 'early stop'}]` : '';
   console.error(
-    `\nDone: ${summary.pass} PASS / ${summary.partial} PARTIAL / ${summary.fail} FAIL / ${summary.error} ERROR (of ${summary.total})`,
+    `\nDone: ${summary.pass} PASS / ${summary.partial} PARTIAL / ${summary.fail} FAIL / ${summary.error} ERROR (of ${summary.total})${abortNote}`,
   );
   for (const dir of summary.runDirs) console.log(dir);
+  if (summary.error > 0 || summary.aborted) {
+    process.exit(1);
+  }
 }
 
-function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positionals: string[], contentRoot: string): void {
+export function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positionals: string[], contentRoot: string): void {
   const runArg = (values.run as string | undefined) ?? positionals[1];
-  if (!runArg) throw new UserError('compare needs a run: `eval compare --run <run-dir-or-id> [--baseline <dir>] [--gate]`');
+  if (!runArg) throw new UserError('compare needs a run: `eval compare --run <run-dir-or-id> [--baseline <dir>] [--gate] [--gate-critical]`');
   const evalDir = resolve(contentRoot, cfg.evalDir ?? './eval');
   const runDir = resolveRunDir(runArg, evalDir, contentRoot);
   const baselineDir = resolve(contentRoot, (values.baseline as string | undefined) ?? cfg.baselineDir ?? baselineDefaultFor(resolveEvalIntent(values, cfg)));
 
   const byCat = groupByCategory(loadResults(runDir));
   const baseByCat = loadBaseline(baselineDir, [...byCat.keys()]);
-  const report = compareRunToBaseline(basename(runDir), byCat, baseByCat);
 
+  const runMetaPath = path.join(runDir, 'run_meta.json');
+  if (existsSync(runMetaPath)) {
+    try {
+      const runMeta = JSON.parse(readFileSync(runMetaPath, 'utf8')) as Record<string, unknown>;
+      const runScoring = (runMeta['scoringVersion'] as string | undefined) ?? 'legacy';
+      for (const cat of byCat.keys()) {
+        let baseMetaPath = path.join(baselineDir, cat, 'run_meta.json');
+        if (!existsSync(baseMetaPath)) {
+          const flatMeta = path.join(baselineDir, 'run_meta.json');
+          if (existsSync(flatMeta)) baseMetaPath = flatMeta;
+        }
+        if (existsSync(baseMetaPath)) {
+          const baseMeta = JSON.parse(readFileSync(baseMetaPath, 'utf8')) as Record<string, unknown>;
+          const baseScoring = (baseMeta['scoringVersion'] as string | undefined) ?? 'legacy';
+          if (runScoring !== baseScoring) {
+            console.error(
+              `[WARN] Scoring version mismatch for ${cat}: run is scored with v${runScoring} but baseline is v${baseScoring}.`,
+            );
+          }
+          const runVaried = runMeta['systemPromptVaried'] === true;
+          const baseVaried = baseMeta['systemPromptVaried'] === true;
+          if (runVaried || baseVaried) {
+            const runShas = (runMeta['systemPromptShas'] as string[] | undefined)?.join(', ');
+            const baseShas = (baseMeta['systemPromptShas'] as string[] | undefined)?.join(', ');
+            if (runVaried && baseVaried) {
+              console.error(`[WARN] System prompt varied across questions in both runs for ${cat} (run used ${runShas}, baseline used ${baseShas}).`);
+            } else if (runVaried) {
+              console.error(`[WARN] System prompt varied across questions during ${cat} run (used ${runShas}).`);
+            } else {
+              console.error(`[WARN] System prompt varied across questions during ${cat} baseline (used ${baseShas}).`);
+            }
+          } else {
+            // Scalar comparison strictly in 'else' so varied runs never trigger spurious mismatch warnings:
+            const runSysSha = runMeta['systemPromptSha'];
+            const baseSysSha = baseMeta['systemPromptSha'];
+            if ((runSysSha || baseSysSha) && runSysSha !== baseSysSha) {
+              console.error(`[WARN] System prompt SHA mismatch for ${cat}: run has ${runSysSha ?? 'none'} but baseline has ${baseSysSha ?? 'none'}.`);
+            }
+          }
+          const runGraderSha = runMeta['graderPromptSha'];
+          const baseGraderSha = baseMeta['graderPromptSha'];
+          if ((runGraderSha || baseGraderSha) && runGraderSha !== baseGraderSha) {
+            console.error(
+              `[WARN] Grader prompt SHA mismatch for ${cat}: run has ${runGraderSha ?? 'none'} but baseline has ${baseGraderSha ?? 'none'}.`,
+            );
+          }
+          const runModel = runMeta['answerModel'];
+          const baseModel = baseMeta['answerModel'];
+          if ((runModel || baseModel) && runModel !== baseModel) {
+            console.error(
+              `[WARN] Answer model mismatch for ${cat}: run used ${runModel ?? 'none'} but baseline used ${baseModel ?? 'none'}.`,
+            );
+          }
+        } else {
+          console.error(
+            `[WARN] Scoring version mismatch for ${cat}: run is scored with v${runScoring} but baseline has no run_meta.json.`,
+          );
+        }
+      }
+    } catch (err) {
+      console.error(
+        `[WARN] Failed to read run or baseline metadata for scoring comparison: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  const report = compareRunToBaseline(basename(runDir), byCat, baseByCat);
   console.log(renderCompareReport(report));
+  if (values['gate-critical'] && report.criticalHardRegressions.length > 0) {
+    console.error(`\nGATE FAILED: ${report.criticalHardRegressions.length} critical hard regression(s).`);
+    process.exit(1);
+  }
   if (values.gate && report.gated) {
-    console.error(`\nGATE FAILED: ${report.hardRegressions.length} hard regression(s).`);
+    console.error(`\nGATE FAILED: ${report.hardRegressions.length} hard regression(s) (${report.criticalHardRegressions.length} critical).`);
     process.exit(1);
   }
 }
@@ -208,6 +298,7 @@ export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, co
     answerModel: normalizeModelName((values['answer-model'] as string | undefined) ?? cfg.answer?.model ?? 'sonnet'),
     thinkingLevel: parseThinkingLevel(values['thinking'] ?? cfg.answer?.thinkingLevel),
     reviewerModel: normalizeModelName((values['reviewer-model'] as string | undefined) ?? cfg.reviewer?.model ?? 'opus'),
+    reviewerThinkingLevel: parseThinkingLevel(values['reviewer-thinking'] ?? cfg.reviewer?.thinkingLevel),
     mcp: {
       serverBaseUrl: cfg.mcp?.serverBaseUrl ?? 'http://localhost:8080',
       bearer: cfg.mcp?.bearer ?? 'dev-local-token',
@@ -232,7 +323,7 @@ function requireGrader(value: string | undefined, key: string, role: string, con
 }
 
 /** What to measure: explicit --eval / config, else derived from execution mode (single→specialist, mas→mas). */
-function resolveEvalIntent(values: Record<string, unknown>, cfg: EvalConfig): 'specialist' | 'mas' | 'orchestration' {
+export function resolveEvalIntent(values: Record<string, unknown>, cfg: EvalConfig): 'specialist' | 'mas' | 'orchestration' {
   const explicit = (values.eval as string | undefined) ?? cfg.run?.eval;
   if (explicit === 'specialist' || explicit === 'mas' || explicit === 'orchestration') return explicit;
   if (explicit) throw new UserError(`Unknown --eval "${explicit}". Use: specialist | mas | orchestration.`);

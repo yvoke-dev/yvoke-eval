@@ -47,12 +47,14 @@ export class SdkAnswerRunner implements AnswerRunner {
         { webAllowedDomains: this.opts.webAllowedDomains },
       ),
       settingSources: [],
+      strictMcpConfig: true,
       includePartialMessages: false,
       model: task.answerModel,
       maxThinkingTokens: thinkingBudget(task.thinkingLevel),
       maxTurns: this.opts.maxTurns,
       cwd: this.opts.sandboxDir,
       env: sanitizedEnv(),
+      abortController: task.abortController,
     };
 
     const messages: StreamMessage[] = [];
@@ -61,12 +63,19 @@ export class SdkAnswerRunner implements AnswerRunner {
     }
 
     const bundle = bundleFromMessages(messages);
+    const rawAnswer = bundle.answer;
 
-    // A captured clarifying question with no produced answer → synthesize the production STOP block so
-    // stop_rule / routing grade identically to prod.
-    if (clarify && bundle.answer.trim().length === 0) {
-      const opts = clarify.options.length > 0 ? `\noptions: ${clarify.options.join(' | ')}` : '';
-      return { ...bundle, answer: `<clarifying-question>${clarify.question}${opts}</clarifying-question>` };
+    // A captured clarifying question → synthesize the production STOP block so
+    // stop_rule / routing grade identically to prod without failing on post-denial prose.
+    if (clarify) {
+      if (task.question.expect === 'clarify' || bundle.answer.trim().length === 0) {
+        const opts = clarify.options.length > 0 ? `\noptions: ${clarify.options.join(' | ')}` : '';
+        return {
+          ...bundle,
+          answer: `<clarifying-question>${clarify.question}${opts}</clarifying-question>`,
+          rawAnswer: rawAnswer.trim().length > 0 ? rawAnswer : undefined,
+        };
+      }
     }
     return bundle;
   }

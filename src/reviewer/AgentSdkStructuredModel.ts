@@ -1,4 +1,5 @@
 import { query, type Options, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { ThinkingLevel } from '../types';
 import type { StructuredModel } from './Judge';
 import { extractJsonObject } from './jsonExtract';
 import { sanitizedEnv } from '../agent/auth';
@@ -6,6 +7,7 @@ import { thinkingBudget } from '../agent/thinking';
 
 export interface AgentSdkModelOptions {
   sandboxDir: string;
+  thinkingLevel?: ThinkingLevel;
 }
 
 /**
@@ -28,20 +30,24 @@ export class AgentSdkStructuredModel implements StructuredModel {
     maxTokens: number;
     toolName: string;
     schema: unknown;
+    abortController?: AbortController;
   }): Promise<unknown> {
     const options: Options = {
       systemPrompt: input.system,
       allowedTools: [],
+      tools: [],
+      strictMcpConfig: true,
       mcpServers: {},
       settingSources: [],
       includePartialMessages: false,
       model: input.model,
-      maxThinkingTokens: thinkingBudget('low'),
-      // A cushion above 1: low thinking consumes a turn before the final text, so maxTurns=1 cuts the
+      maxThinkingTokens: thinkingBudget(this.opts.thinkingLevel ?? 'low'),
+      // A cushion above 1: thinking consumes a turn before the final text, so maxTurns=1 cuts the
       // response off ("Reached maximum number of turns"). No tools here, so it cannot loop.
       maxTurns: 4,
       cwd: this.opts.sandboxDir,
       env: sanitizedEnv(),
+      abortController: input.abortController,
     };
 
     const parts: string[] = [];

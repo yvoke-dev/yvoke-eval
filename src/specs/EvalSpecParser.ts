@@ -109,6 +109,8 @@ export class EvalSpecParser {
         }
         q.expectedSpecialists = expectedSpecialists;
       }
+      const mustIncludeAny = parseMustIncludeAny(s);
+      if (mustIncludeAny) q.mustIncludeAny = mustIncludeAny;
       const expectedDelegation = optStr(s, 'expected_delegation');
       if (expectedDelegation !== undefined) q.expectedDelegation = expectedDelegation;
       const minReviewRounds = num(s, 'min_review_rounds');
@@ -117,6 +119,19 @@ export class EvalSpecParser {
     }
     return qs;
   }
+}
+
+function parseMustIncludeAny(spec: Record<string, unknown>): string[][] | undefined {
+  const val = spec.must_include_any;
+  if (!Array.isArray(val) || val.length === 0) return undefined;
+  const groups: string[][] = [];
+  for (const item of val) {
+    if (Array.isArray(item)) {
+      const g = item.map((x) => String(x).trim()).filter(Boolean);
+      if (g.length > 0) groups.push(g);
+    }
+  }
+  return groups.length > 0 ? groups : undefined;
 }
 
 function isFile(p: string): boolean {

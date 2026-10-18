@@ -10,6 +10,7 @@ interface CapturedQueryCall {
 }
 
 const capturedCalls: CapturedQueryCall[] = [];
+let mockQueryStream: ((options: Options) => AsyncIterable<unknown>) | undefined;
 
 vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@anthropic-ai/claude-agent-sdk')>();
@@ -17,6 +18,9 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
     ...actual,
     query: (args: CapturedQueryCall) => {
       capturedCalls.push(args);
+      if (mockQueryStream) {
+        return mockQueryStream(args.options);
+      }
       return (async function* () {
         yield {
           type: 'assistant',
@@ -29,6 +33,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
     },
   };
 });
+
 
 describe('SdkAnswerRunner — Prompt Assembly & Clean User Message', () => {
   it('passes the combined prompt to options.systemPrompt and only q.question to prompt user message', async () => {
@@ -106,4 +111,166 @@ describe('SdkAnswerRunner — Prompt Assembly & Clean User Message', () => {
     expect(capturedCalls).toHaveLength(1);
     expect(capturedCalls[0]!.options.systemPrompt).toBe('');
   });
+
+  it('passes task.abortController to options.abortController', async () => {
+    capturedCalls.length = 0;
+    const runner = new SdkAnswerRunner({
+      serverBaseUrl: 'http://localhost:8080',
+      bearer: 'tok',
+      transport: 'http',
+      sandboxDir: '/tmp/sandbox',
+      maxTurns: 5,
+    });
+
+    const ac = new AbortController();
+    const task: EvalTask = {
+      question: mkQuestion(),
+      modelContent: 'Plain question?',
+      answerModel: 'claude-3-5-sonnet',
+      systemPrompt: null,
+      thinkingLevel: 'low',
+      codeExecution: true,
+      abortController: ac,
+    };
+
+    await runner.run(task);
+    expect(capturedCalls).toHaveLength(1);
+    expect(capturedCalls[0]!.options.abortController).toBe(ac);
+  });
 });
+
+describe('SdkAnswerRunner — Clarify Override', () => {
+  it('overrides post-denial prose with <clarifying-question> when expect is clarify', async () => {
+    mockQueryStream = async function* (options) {
+      if (options.canUseTool) {
+        await options.canUseTool(
+          'mcp__yvoke__ask_clarifying_question',
+          {
+            question: 'Which version?',
+            options: ['9.3', '10.0'],
+          },
+          { signal: new AbortController().signal, toolUseID: 'call-1', requestId: 'req-1' },
+        );
+      }
+      yield {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Post-denial prose' }],
+        },
+      };
+    };
+
+    const runner = new SdkAnswerRunner({
+      serverBaseUrl: 'http://localhost:8080',
+      bearer: 'tok',
+      transport: 'http',
+      sandboxDir: '/tmp/sandbox',
+      maxTurns: 5,
+    });
+
+    const task: EvalTask = {
+      question: mkQuestion({ expect: 'clarify' }),
+      modelContent: 'Ambiguous question?',
+      answerModel: 'claude-3-5-sonnet',
+      systemPrompt: null,
+      thinkingLevel: 'low',
+      codeExecution: true,
+    };
+
+    const bundle = await runner.run(task);
+    expect(bundle.answer).toBe('<clarifying-question>Which version?\noptions: 9.3 | 10.0</clarifying-question>');
+    expect(bundle.rawAnswer).toBe('Post-denial prose');
+    mockQueryStream = undefined;
+  });
+
+  it('preserves answer prose and does NOT override when expect is answer and answer is non-empty', async () => {
+    mockQueryStream = async function* (options) {
+      if (options.canUseTool) {
+        await options.canUseTool(
+          'mcp__yvoke__ask_clarifying_question',
+          {
+            question: 'Which version?',
+            options: ['9.3', '10.0'],
+          },
+          { signal: new AbortController().signal, toolUseID: 'call-2', requestId: 'req-2' },
+        );
+      }
+      yield {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Genuine answer prose' }],
+        },
+      };
+    };
+
+    const runner = new SdkAnswerRunner({
+      serverBaseUrl: 'http://localhost:8080',
+      bearer: 'tok',
+      transport: 'http',
+      sandboxDir: '/tmp/sandbox',
+      maxTurns: 5,
+    });
+
+    const task: EvalTask = {
+      question: mkQuestion({ expect: 'answer' }),
+      modelContent: 'Standard question?',
+      answerModel: 'claude-3-5-sonnet',
+      systemPrompt: null,
+      thinkingLevel: 'low',
+      codeExecution: true,
+    };
+
+    const bundle = await runner.run(task);
+    expect(bundle.answer).toBe('Genuine answer prose');
+    expect(bundle.rawAnswer).toBeUndefined();
+    mockQueryStream = undefined;
+  });
+
+  it('overrides with <clarifying-question> when answer is empty regardless of expect value', async () => {
+    mockQueryStream = async function* (options) {
+      if (options.canUseTool) {
+        await options.canUseTool(
+          'mcp__yvoke__ask_clarifying_question',
+          {
+            question: 'Which version?',
+            options: [],
+          },
+          { signal: new AbortController().signal, toolUseID: 'call-3', requestId: 'req-3' },
+        );
+      }
+      yield {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '' }],
+        },
+      };
+    };
+
+    const runner = new SdkAnswerRunner({
+      serverBaseUrl: 'http://localhost:8080',
+      bearer: 'tok',
+      transport: 'http',
+      sandboxDir: '/tmp/sandbox',
+      maxTurns: 5,
+    });
+
+    const task: EvalTask = {
+      question: mkQuestion({ expect: 'answer' }),
+      modelContent: 'Standard question?',
+      answerModel: 'claude-3-5-sonnet',
+      systemPrompt: null,
+      thinkingLevel: 'low',
+      codeExecution: true,
+    };
+
+    const bundle = await runner.run(task);
+    expect(bundle.answer).toBe('<clarifying-question>Which version?</clarifying-question>');
+    expect(bundle.rawAnswer).toBeUndefined();
+    mockQueryStream = undefined;
+  });
+});
+
+

@@ -32,7 +32,10 @@ export class MasAnswerRunner {
     private readonly orch: ResolvedOrchestrator,
   ) {}
 
-  async run(modelContent: string): Promise<AnswerBundle> {
+  async run(
+    modelContent: string,
+    opts?: { abortController?: AbortController; expect?: string },
+  ): Promise<AnswerBundle> {
     let clarify: { question: string; options: string[] } | undefined;
 
     const options: Options = {
@@ -62,12 +65,14 @@ export class MasAnswerRunner {
         },
       ),
       settingSources: [],
+      strictMcpConfig: true,
       includePartialMessages: false,
       model: this.orch.orchestratorModel,
       maxThinkingTokens: thinkingBudget(this.orch.orchestratorThinking),
       maxTurns: this.orch.orchestratorMaxTurns,
       cwd: this.opts.sandboxDir,
       env: sanitizedEnv(),
+      abortController: opts?.abortController,
     };
 
     const messages: StreamMessage[] = [];
@@ -89,25 +94,32 @@ export class MasAnswerRunner {
     }
 
     const trace: OrchestrationTrace = { ...orchestrationTraceFromMessages(messages), reviewEnforced: enforced };
-    return assembleMasBundle(bundleFromMessages(messages), trace, clarify);
+    return assembleMasBundle(bundleFromMessages(messages), trace, clarify, opts?.expect);
   }
 }
 
 /**
- * Assemble the final AnswerBundle: attach the orchestration trace, and on the clarify path (empty
- * answer + a captured clarification) replace the answer with the clarifying-question marker WHILE
- * keeping the trace. Extracted as a pure function so the trace-preservation contract is unit-tested
- * (run() itself drives query() and is integration-only).
+ * Assemble the final AnswerBundle: attach the orchestration trace, and on the clarify path
+ * replace the answer with the clarifying-question marker WHILE keeping the trace. Extracted as a pure
+ * function so the trace-preservation contract is unit-tested (run() itself drives query() and is integration-only).
  */
 export function assembleMasBundle(
   base: AnswerBundle,
   trace: OrchestrationTrace,
   clarify?: { question: string; options: string[] },
+  expectBehavior?: string,
 ): AnswerBundle {
   const bundle: AnswerBundle = { ...base, orchestration: trace };
-  if (clarify && bundle.answer.trim().length === 0) {
-    const opts = clarify.options.length > 0 ? `\noptions: ${clarify.options.join(' | ')}` : '';
-    return { ...bundle, answer: `<clarifying-question>${clarify.question}${opts}</clarifying-question>` };
+  const rawAnswer = base.answer;
+  if (clarify) {
+    if (expectBehavior === 'clarify' || base.answer.trim().length === 0) {
+      const opts = clarify.options.length > 0 ? `\noptions: ${clarify.options.join(' | ')}` : '';
+      return {
+        ...bundle,
+        answer: `<clarifying-question>${clarify.question}${opts}</clarifying-question>`,
+        rawAnswer: rawAnswer.trim().length > 0 ? rawAnswer : undefined,
+      };
+    }
   }
   return bundle;
 }

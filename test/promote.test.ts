@@ -71,4 +71,19 @@ describe('promote', () => {
     expect(existsSync(join(baselineDir, 'developer_api', 'results.json'))).toBe(true);
     expect(existsSync(join(baselineDir, 'getting_started'))).toBe(false);
   });
+
+  it('rejects promoting a run that contains ERROR results', () => {
+    tmp = mkdtempSync(join(tmpdir(), 'yvoke-eval-promote-'));
+    const runDir = join(tmp, 'run');
+    mkdirSync(runDir, { recursive: true });
+    const errResult = mkResult('getting_started', 'Q1', 'ERROR');
+    errResult.error = 'timeout error';
+    errResult.question.critical = true;
+    errResult.signals.mustIncludeMissing = ['Widget'];
+    writeFileSync(join(runDir, 'results.json'), toJson([errResult]));
+    writeFileSync(join(runDir, 'run_meta.json'), toJson({ answerModel: 'sonnet', gitSha: 'abc', timestamp: 'ts' }));
+
+    const baselineDir = join(tmp, 'baseline');
+    expect(() => promote(runDir, baselineDir)).toThrow(/contains 1 ERROR result/);
+  });
 });

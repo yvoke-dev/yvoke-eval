@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildEvalTask, resolvePlaybookSystemPrompt } from '../src/agent/buildTask';
-import { SystemPromptClient } from '../src/server/SystemPromptClient';
+import { SystemPromptClient, SYSTEM_PROMPT_NAME } from '../src/server/SystemPromptClient';
 import type { PromptSource, McpPromptInfo } from '../src/mcp/McpPrompts';
 import { mkQuestion } from './fixtures';
 
@@ -35,9 +35,9 @@ function stubSystemPromptClient(reply: Record<string, string | null | Error>) {
 }
 
 describe('buildEvalTask — Prompt Assembly & Clean User Message (R1)', () => {
-  it('combines baseSystemPrompt and playbookText separated by \\n\\n---\\n\\n', async () => {
+  it('combines baseSystemPrompt and playbookText separated by \\n\\n---\\n\\n and forwards playbookVersion', async () => {
     const q = mkQuestion({ playbook: 'demo-basics' });
-    const prompts = mkPrompts([{ name: 'demo-basics', title: 'Basics', description: '' }], 'PLAYBOOK TEXT');
+    const prompts = mkPrompts([{ name: 'demo-basics', title: 'Basics', description: '', version: 2 }], 'PLAYBOOK TEXT');
     const task = await buildEvalTask(q, prompts, {
       answerModel: 'sonnet',
       thinkingLevel: 'low',
@@ -47,6 +47,7 @@ describe('buildEvalTask — Prompt Assembly & Clean User Message (R1)', () => {
     expect(task.systemPrompt).toBe('GROUNDING RULES\n\n---\n\nPLAYBOOK TEXT');
     expect(task.modelContent).toBe(q.question);
     expect(task.modelContent).not.toContain('PLAYBOOK TEXT');
+    expect(task.playbookVersion).toBe(2);
   });
 
   it('leaves baseSystemPrompt as-is when question has no playbook', async () => {
@@ -162,23 +163,47 @@ describe('buildEvalTask & resolvePlaybookSystemPrompt — Designated System Prom
     });
 
     // 1. Success with custom prompt
-    await expect(resolvePlaybookSystemPrompt('custom', client, 'FALLBACK PROMPT')).resolves.toBe('CUSTOM PROMPT');
+    await expect(resolvePlaybookSystemPrompt('custom', client, 'FALLBACK PROMPT')).resolves.toEqual({
+      text: 'CUSTOM PROMPT',
+      name: 'custom',
+      fallback: false,
+    });
 
     // 2. Absent / empty custom prompt falls back to defaultPrompt
-    await expect(resolvePlaybookSystemPrompt('nonexistent', client, 'FALLBACK PROMPT')).resolves.toBe('FALLBACK PROMPT');
+    await expect(resolvePlaybookSystemPrompt('nonexistent', client, 'FALLBACK PROMPT')).resolves.toEqual({
+      text: 'FALLBACK PROMPT',
+      name: SYSTEM_PROMPT_NAME,
+      fallback: true,
+    });
 
     // 3. Undefined custom prompt uses defaultPrompt
-    await expect(resolvePlaybookSystemPrompt(undefined, client, 'FALLBACK PROMPT')).resolves.toBe('FALLBACK PROMPT');
+    await expect(resolvePlaybookSystemPrompt(undefined, client, 'FALLBACK PROMPT')).resolves.toEqual({
+      text: 'FALLBACK PROMPT',
+      name: SYSTEM_PROMPT_NAME,
+      fallback: false,
+    });
 
     // 4. Error on custom prompt falls back to defaultPrompt
     const failingClient = stubSystemPromptClient({
       broken: new Error('boom'),
       'default-chat': 'FALLBACK PROMPT',
     });
-    await expect(resolvePlaybookSystemPrompt('broken', failingClient, 'FALLBACK PROMPT')).resolves.toBe('FALLBACK PROMPT');
+    await expect(resolvePlaybookSystemPrompt('broken', failingClient, 'FALLBACK PROMPT')).resolves.toEqual({
+      text: 'FALLBACK PROMPT',
+      name: SYSTEM_PROMPT_NAME,
+      fallback: true,
+    });
 
     // 5. Explicit null fallback returns null and does NOT fall through to default-chat
-    await expect(resolvePlaybookSystemPrompt(undefined, client, null)).resolves.toBeNull();
-    await expect(resolvePlaybookSystemPrompt('nonexistent', client, null)).resolves.toBeNull();
+    await expect(resolvePlaybookSystemPrompt(undefined, client, null)).resolves.toEqual({
+      text: null,
+      name: null,
+      fallback: false,
+    });
+    await expect(resolvePlaybookSystemPrompt('nonexistent', client, null)).resolves.toEqual({
+      text: null,
+      name: SYSTEM_PROMPT_NAME,
+      fallback: true,
+    });
   });
 });

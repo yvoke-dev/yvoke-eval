@@ -32,11 +32,16 @@ export interface EvalTask {
   playbookTools?: string[];
   thinkingLevel: ThinkingLevel;
   codeExecution: boolean;
+  abortController?: AbortController;
+  systemPromptName?: string | null;
+  systemPromptFallback?: boolean;
+  playbookVersion?: number | null;
 }
 
 /** Provider-agnostic result of producing one answer — the sole input to signal extraction. */
 export interface AnswerBundle {
   answer: string;
+  rawAnswer?: string;
   toolCalls: ToolInvocation[];
   retrievedChunkIds: string[];
   promptTokens: number;

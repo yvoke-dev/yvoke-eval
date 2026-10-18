@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { EvalResult } from '../types';
+import { UserError, type EvalResult } from '../types';
 import { loadResults, groupByCategory, baselineCategories } from './BaselineComparator';
 import { effectiveVerdict } from './verdict';
 import { renderSummary, renderCategoryReport, toJson } from '../report/ReportWriter';
@@ -23,6 +23,12 @@ export function promote(runDir: string, baselineDir: string, categoryFilter?: st
   const promoted: string[] = [];
   for (const [cat, catResults] of byCat) {
     if (filter && !filter.has(cat)) continue;
+    const errorCount = catResults.filter((r) => effectiveVerdict(r) === 'ERROR').length;
+    if (errorCount > 0) {
+      throw new UserError(
+        `Cannot promote ${cat} from ${runId}: contains ${errorCount} ERROR result(s). A run must be error-free to become a baseline.`,
+      );
+    }
     const dir = join(baselineDir, cat);
     mkdirSync(dir, { recursive: true });
     const catMeta: Record<string, unknown> = { ...meta, questionCount: catResults.length, sourceRun: runId };

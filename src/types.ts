@@ -35,6 +35,7 @@ export interface EvalQuestion {
   citationsRequired: boolean;
   critical: boolean;
   rubric: string | null;
+  mustIncludeAny?: string[][];
   // Orchestration-eval (Mode 3) expectations — OPTIONAL, opt-in per question. Absent for specialist /
   // MAS eval; the parser omits absent keys so a non-opt-in question's serialized shape is unchanged.
   expectedSpecialists?: string[];
@@ -59,6 +60,8 @@ export interface Signals {
    */
   expectedToolsMissing: string[];
   hasCitations: boolean;
+  /** UUID citations that appeared in the answer but never in any tool result. */
+  unverifiedCitations?: string[];
 }
 
 /**
@@ -163,6 +166,8 @@ export function errorVerdict(reason: string): Verdict {
 export interface EvalResult {
   question: EvalQuestion;
   answer: string | null;
+  /** Raw model output before any STOP block synthesis (e.g. post-denial prose). */
+  rawAnswer?: string | null;
   signals: Signals;
   verdict: Verdict;
   promptTokens: number;
@@ -170,6 +175,12 @@ export interface EvalResult {
   totalTokens: number;
   latencyMs: number;
   error: string | null;
+  /** Persisted tool evidence shown to the judge — enables 100% offline re-grading without transcripts. */
+  toolEvidence?: import('./agent/AnswerBundle').ToolEvidence[];
+  /** Authoritative retrieved chunk IDs — preserves full citation evidence even when toolEvidence text is truncated. */
+  retrievedChunkIds?: string[];
+  /** Cumulative session cost in USD. */
+  costUsd?: number;
   // Orchestration eval (Mode 3) — OPTIONAL, present only on the orchestration path. Appended so the
   // specialist / MAS results.json shape is unchanged (absent → omitted by JSON.stringify).
   orchestrationSignals?: OrchestrationSignals;

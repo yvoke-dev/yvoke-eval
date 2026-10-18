@@ -29,6 +29,16 @@ export function isAuthError(message: string): boolean {
   );
 }
 
+export function isQuotaError(message: string): boolean {
+  return /hit your session limit|session limit|rate limit|rate_limit|insufficient_quota|quota exceeded|exceeded.*quota|credit balance|billing|out of credits|too many requests|429/i.test(
+    message,
+  );
+}
+
+export function isQuotaOrAuthError(message: string): boolean {
+  return isAuthError(message) || isQuotaError(message);
+}
+
 /** Inherit the environment except ANTHROPIC_API_KEY (which would switch billing off the subscription). */
 export function sanitizedEnv(
   base: NodeJS.ProcessEnv = process.env,
@@ -41,3 +51,8 @@ export function sanitizedEnv(
 export const LOGIN_INSTRUCTIONS =
   'No Claude credentials found. Sign in with your Claude (Pro/Max) account by running ' +
   '`claude /login` in a terminal (install via `npm install -g @anthropic-ai/claude-code` if needed).';
+
+export const QUOTA_INSTRUCTIONS =
+  'Claude session limit or quota exhausted ("You\'ve hit your session limit" / 429). ' +
+  'The evaluation suite was halted immediately to prevent recording distorted ERROR results.';
+

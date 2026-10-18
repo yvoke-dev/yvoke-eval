@@ -2,8 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ReportWriter, toJson, newRunId, formatModelDisplay } from '../src/report/ReportWriter';
+import { ReportWriter, toJson, newRunId, formatModelDisplay, renderCategoryReport } from '../src/report/ReportWriter';
 import type { EvalResult } from '../src/types';
+import { mkQuestion } from './fixtures';
 
 const evalDir = fileURLToPath(new URL('./fixtures/eval', import.meta.url));
 const baselineResults = join(evalDir, 'baseline', 'basics', 'results.json');
@@ -161,6 +162,30 @@ describe('ReportWriter — run folder', () => {
       rmSync(overviewPath, { force: true });
     }
   });
+
+  it('renders playbookVersion in summary.md and OVERVIEW.md Playbook Version column', () => {
+    const results = JSON.parse(readFileSync(baselineResults, 'utf8')) as EvalResult[];
+    const meta = {
+      answerModel: 'claude-haiku-5-5',
+      reviewerModel: 'claude-sonnet-5-5',
+      thinkingLevel: 'high',
+      playbookVersion: 2,
+      gitSha: 'testsha',
+    };
+    const overviewPath = join(evalDir, 'runs', 'OVERVIEW.md');
+    const { runDir } = new ReportWriter().write(evalDir, meta, results);
+    try {
+      const summary = readFileSync(join(runDir, 'summary.md'), 'utf8');
+      expect(summary).toContain('- playbook version: `v2`');
+
+      const overview = readFileSync(overviewPath, 'utf8');
+      expect(overview).toContain('| Date (UTC) | Run ID | Mode | Playbook Version | Category / Scope |');
+      expect(overview).toContain('| single | v2 | basics (3 Qs) |');
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+      rmSync(overviewPath, { force: true });
+    }
+  });
 });
 
 describe('formatModelDisplay', () => {
@@ -180,3 +205,32 @@ describe('formatModelDisplay', () => {
     expect(formatModelDisplay('haiku', 'claude-haiku-4-5-20251001')).toBe('haiku (claude-haiku-4-5-20251001)');
   });
 });
+
+describe('renderCategoryReport — unverifiedCitations', () => {
+  it('renders unverifiedCitations when present in signals', () => {
+    const r: EvalResult = {
+      question: mkQuestion({ category: 'basics', id: 'Q1' }),
+      answer: 'test answer',
+      signals: {
+        toolsFired: ['search_corpus'],
+        searchCollections: ['GS'],
+        retrievedCollections: ['GS'],
+        retrievedChunkCount: 1,
+        mustIncludeMissing: [],
+        mustNotIncludePresent: [],
+        expectedToolsMissing: [],
+        hasCitations: true,
+        unverifiedCitations: ['11111111-1111-1111-1111-111111111111'],
+      },
+      verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok', evidence: [] },
+      promptTokens: 10,
+      completionTokens: 20,
+      totalTokens: 30,
+      latencyMs: 100,
+      error: null,
+    };
+    const report = renderCategoryReport('basics', [r]);
+    expect(report).toContain('unverifiedCitations=["11111111-1111-1111-1111-111111111111"]');
+  });
+});
+

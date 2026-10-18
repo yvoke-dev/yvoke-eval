@@ -13,10 +13,13 @@ export function verdictRank(v: string): number {
 }
 
 /**
- * The effective verdict, applying the deterministic backstop the judge cannot override: a
- * `must_not_include` hit (fabrication) is an automatic FAIL regardless of what the model judge said.
+ * The effective verdict, applying the deterministic backstop the judge cannot override:
+ * - A `must_not_include` hit (fabrication) is an automatic FAIL.
+ * - On `critical: true` questions, any missing `must_include` token is an automatic FAIL.
  */
 export function effectiveVerdict(r: EvalResult): string {
-  if (r.signals.mustNotIncludePresent.length > 0) return 'FAIL';
+  if (r.verdict.verdict === 'ERROR' || r.error != null) return 'ERROR';
+  if ((r.signals?.mustNotIncludePresent?.length ?? 0) > 0) return 'FAIL';
+  if (r.question.critical && (r.signals?.mustIncludeMissing?.length ?? 0) > 0) return 'FAIL';
   return r.verdict.verdict;
 }

@@ -1,8 +1,20 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, rmSync } from 'node:fs';
+import { readFileSync, rmSync, mkdtempSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { execSync } from 'node:child_process';
+import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { runSuite, selectQuestions, type RunConfig, type RunDeps } from '../src/run/runSuite';
+import {
+  runSuite,
+  selectQuestions,
+  withTimeout,
+  CachedPromptSource,
+  harnessGitSha,
+  gitShaForDir,
+  type RunConfig,
+  type RunDeps,
+} from '../src/run/runSuite';
 import { SYSTEM_PROMPT_NAME } from '../src/server/SystemPromptClient';
 import type { PromptSource } from '../src/mcp/McpPrompts';
 import type { EvalTask } from '../src/agent/AnswerBundle';
@@ -238,3 +250,802 @@ describe('runSuite — playbook-designated system prompt resolution', () => {
     }
   });
 });
+
+describe('withTimeout', () => {
+  it('aborts the AbortController when timing out', async () => {
+    let signalAborted = false;
+    let abortReason: unknown;
+    await expect(
+      withTimeout(
+        async (ac) => {
+          ac.signal.addEventListener('abort', () => {
+            signalAborted = true;
+            abortReason = ac.signal.reason;
+          });
+          await new Promise((r) => setTimeout(r, 100));
+          return 'ok';
+        },
+        10,
+        'test operation',
+      ),
+    ).rejects.toThrow(/Timed out after 0s while test operation/);
+
+    expect(signalAborted).toBe(true);
+    expect(abortReason).toBeInstanceOf(Error);
+    expect((abortReason as Error).message).toMatch(/Timed out/);
+  });
+});
+
+describe('CachedPromptSource', () => {
+  it('evicts failed getText promises so subsequent calls can retry', async () => {
+    let attempts = 0;
+    const inner: PromptSource = {
+      list: async () => [],
+      getText: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error('transient failure');
+        return 'success';
+      },
+      serverVersion: () => undefined,
+      close: async () => {},
+    };
+    const cached = new CachedPromptSource(inner);
+    await expect(cached.getText('test')).rejects.toThrow('transient failure');
+    const res = await cached.getText('test');
+    expect(res).toBe('success');
+    expect(attempts).toBe(2);
+  });
+
+  it('evicts failed list promises so subsequent calls can retry', async () => {
+    let attempts = 0;
+    const inner: PromptSource = {
+      list: async () => {
+        attempts++;
+        if (attempts === 1) throw new Error('transient failure');
+        return [{ name: 'p1', title: 'P1', description: '', tools: [] }];
+      },
+      getText: async () => '',
+      serverVersion: () => undefined,
+      close: async () => {},
+    };
+    const cached = new CachedPromptSource(inner);
+    await expect(cached.list()).rejects.toThrow('transient failure');
+    const res = await cached.list();
+    expect(res).toHaveLength(1);
+    expect(attempts).toBe(2);
+  });
+});
+
+describe('runSuite — judge quota exhaustion aborts suite', () => {
+  it('stops suite immediately with aborted: true when judge returns quota error', async () => {
+    const h = harness();
+    let judgeCalls = 0;
+    h.deps.judge = {
+      async review() {
+        judgeCalls++;
+        return {
+          verdict: 'ERROR',
+          dimensions: {},
+          reasoning: '429 You have exhausted your capacity limit. Please wait before retrying.',
+          evidence: [],
+        };
+      },
+    };
+    // basics has 6 questions (Q1..Q5, Q7; Q6 is skipped), limit: 0 runs all
+    const summary = await runSuite(cfg({ limit: 0 }), () => {}, h.deps);
+    try {
+      expect(judgeCalls).toBe(1); // Aborted after the first question!
+      expect(summary.aborted).toBe(true);
+      expect(summary.abortReason).toBeDefined();
+      expect(summary.error).toBe(1);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+});
+
+describe('runSuite — scoring version and provenance', () => {
+  it('records scoringVersion 2.2, harnessGitSha, contentGitSha, and systemPromptSha in run_meta.json', async () => {
+    const h = harness();
+    const config = cfg();
+    const summary = await runSuite(config, () => {}, h.deps);
+    try {
+      const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
+      expect(meta.scoringVersion).toBe('2.2');
+      expect(meta.harnessGitSha).toBe(harnessGitSha());
+      expect(meta.contentGitSha).toBe(gitShaForDir(config.evalDir));
+      expect(typeof meta.systemPromptSha).toBe('string');
+      expect(meta.systemPromptSha).toMatch(/^[0-9a-fA-F]{64}$/);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+
+  it('hashes the exact task system prompt including designated prompt text', async () => {
+    const fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('oim-structured')) {
+        return new Response(JSON.stringify({ systemPrompt: 'CUSTOM DESIGNATED STRUCTURED PROMPT' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT CHAT PROMPT' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const prompts: PromptSource = {
+      list: async () => [
+        {
+          name: 'demo-basics',
+          title: 'Basics',
+          description: '',
+          tools: ['search_corpus'],
+          systemPrompt: 'oim-structured',
+        },
+      ],
+      getText: async () => 'PLAYBOOK TEMPLATE TEXT',
+      serverVersion: () => undefined,
+      close: async () => {},
+    };
+
+    const deps: Partial<RunDeps> = {
+      credentials: () => 'ok',
+      fetchFn,
+      prompts,
+      answerRunner: {
+        run: async () => mkBundle({ answer: 'an answer' }),
+      },
+      judge: passJudge,
+    };
+
+    const summary = await runSuite(cfg(), () => {}, deps);
+    try {
+      const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
+      const expectedText = 'CUSTOM DESIGNATED STRUCTURED PROMPT\n\n---\n\nPLAYBOOK TEMPLATE TEXT';
+      const expectedSha = createHash('sha256').update(expectedText).digest('hex');
+      const defaultSha = createHash('sha256').update('DEFAULT CHAT PROMPT\n\n---\n\nPLAYBOOK TEMPLATE TEXT').digest('hex');
+      expect(meta.systemPromptName).toBe('oim-structured');
+      expect(meta.systemPromptSha).toBe(expectedSha);
+      expect(meta.systemPromptSha).not.toBe(defaultSha);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+
+  it('records distinct contentGitSha when evalDir is a separate git repository', async () => {
+    const tmp = mkdtempSync(join(os.tmpdir(), 'yvoke-separate-git-'));
+    try {
+      execSync('git init -b main', { cwd: tmp, stdio: 'ignore' });
+      execSync('git config user.email "test@example.com"', { cwd: tmp, stdio: 'ignore' });
+      execSync('git config user.name "Test"', { cwd: tmp, stdio: 'ignore' });
+      mkdirSync(join(tmp, 'eval'), { recursive: true });
+      copyFileSync(join(EVAL_DIR, 'eval_specs.yaml'), join(tmp, 'eval', 'eval_specs.yaml'));
+      copyFileSync(join(EVAL_DIR, 'eval_basics.md'), join(tmp, 'eval', 'eval_basics.md'));
+      execSync('git add . && git commit -m "content commit"', { cwd: tmp, stdio: 'ignore' });
+
+      const separateSha = gitShaForDir(join(tmp, 'eval'));
+      expect(separateSha).not.toBe(harnessGitSha());
+
+      const h = harness();
+      const customCfg: RunConfig = {
+        ...cfg(),
+        evalDir: join(tmp, 'eval'),
+      };
+      const summary = await runSuite(customCfg, () => {}, h.deps);
+      try {
+        const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
+        expect(meta.contentGitSha).toBe(separateSha);
+        expect(meta.harnessGitSha).toBe(harnessGitSha());
+        expect(meta.contentGitSha).not.toBe(meta.harnessGitSha);
+      } finally {
+        summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('harnessGitSha and gitShaForDir', () => {
+  it('detects clean and dirty working trees including pathspec exclusion for eval/runs and runs', () => {
+    const tmp = mkdtempSync(join(os.tmpdir(), 'yvoke-git-'));
+    try {
+      execSync('git init -b main', { cwd: tmp, stdio: 'ignore' });
+      execSync('git config user.email "test@example.com"', { cwd: tmp, stdio: 'ignore' });
+      execSync('git config user.name "Test"', { cwd: tmp, stdio: 'ignore' });
+      mkdirSync(join(tmp, 'graders'), { recursive: true });
+      mkdirSync(join(tmp, 'eval'), { recursive: true });
+      writeFileSync(join(tmp, 'graders', 'oim.md'), 'grader content\n');
+      writeFileSync(join(tmp, 'eval', 'specs.yaml'), 'specs\n');
+      execSync('git add . && git commit -m "initial"', { cwd: tmp, stdio: 'ignore' });
+
+      // Clean tree
+      const cleanSha = harnessGitSha(tmp);
+      expect(cleanSha).not.toContain('-dirty');
+      expect(cleanSha).toMatch(/^[0-9a-fA-F]{7,12}$/);
+
+      // Untracked file in root -> dirty in harnessGitSha
+      writeFileSync(join(tmp, 'untracked_harness.ts'), 'content\n');
+      expect(harnessGitSha(tmp)).toBe(`${cleanSha}-dirty`);
+      rmSync(join(tmp, 'untracked_harness.ts'));
+      expect(harnessGitSha(tmp)).toBe(cleanSha);
+
+      // Tracked file modification in root -> dirty in harnessGitSha
+      writeFileSync(join(tmp, 'graders', 'oim.md'), 'modified\n');
+      expect(harnessGitSha(tmp)).toBe(`${cleanSha}-dirty`);
+      // Restore tracked file
+      execSync('git checkout graders/oim.md', { cwd: tmp, stdio: 'ignore' });
+      expect(harnessGitSha(tmp)).toBe(cleanSha);
+
+      // In gitShaForDir called with <repo>/eval:
+      // 1. Clean when called on eval subdirectory
+      const evalSubdir = join(tmp, 'eval');
+      expect(gitShaForDir(evalSubdir)).toBe(cleanSha);
+
+      // 2. Untracked file inside eval/runs/ does NOT mark dirty
+      mkdirSync(join(tmp, 'eval', 'runs', 'r1'), { recursive: true });
+      writeFileSync(join(tmp, 'eval', 'runs', 'r1', 'result.json'), '{"output":1}');
+      expect(gitShaForDir(evalSubdir)).toBe(cleanSha);
+
+      // 3. Untracked file inside root runs/ does NOT mark dirty
+      mkdirSync(join(tmp, 'runs', 'r2'), { recursive: true });
+      writeFileSync(join(tmp, 'runs', 'r2', 'result.json'), '{"output":2}');
+      expect(gitShaForDir(evalSubdir)).toBe(cleanSha);
+
+      // 4. Modifying root graders/oim.md DOES mark gitShaForDir dirty even when called with evalSubdir
+      writeFileSync(join(tmp, 'graders', 'oim.md'), 'changed\n');
+      expect(gitShaForDir(evalSubdir)).toBe(`${cleanSha}-dirty`);
+      execSync('git checkout graders/oim.md', { cwd: tmp, stdio: 'ignore' });
+      expect(gitShaForDir(evalSubdir)).toBe(cleanSha);
+
+      // 5. Untracked file in eval/specs/ DOES mark gitShaForDir dirty
+      mkdirSync(join(tmp, 'eval', 'specs'), { recursive: true });
+      writeFileSync(join(tmp, 'eval', 'specs', 'new.yaml'), 'spec: 1');
+      expect(gitShaForDir(evalSubdir)).toBe(`${cleanSha}-dirty`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+
+describe('selectQuestions — orchestration_ie filtering', () => {
+  it('filters out orchestration_ie when in specialist intent with no categories specified', () => {
+    const dir = mkdtempSync(join(os.tmpdir(), 'yvoke-select-'));
+    try {
+      writeFileSync(
+        join(dir, 'eval_specs.yaml'),
+        `
+basics:
+  Q1: {}
+orchestration_ie:
+  Q1:
+    expected_specialists: [specialist-a]
+`,
+      );
+      writeFileSync(join(dir, 'eval_basics.md'), '# Basics\n\n## Q1 — Question 1\n');
+      writeFileSync(
+        join(dir, 'eval_orchestration_ie.md'),
+        '# Orchestration\n\n## Q1 — Question 1\n',
+      );
+
+      const specialist = selectQuestions(cfg({ evalDir: dir, evalIntent: 'specialist', categories: [] }));
+      expect(specialist.some((q) => q.category === 'orchestration_ie')).toBe(false);
+      expect(specialist.some((q) => q.category === 'basics')).toBe(true);
+
+      const orchestration = selectQuestions(
+        cfg({
+          evalDir: dir,
+          evalIntent: 'orchestration',
+          categories: [],
+          mas: {
+            profile: {
+              orchestratorPlaybook: 'skills/oim-orchestrator.md',
+              reviewerPlaybook: 'skills/oim-reviewer.md',
+              specialistPlaybooks: ['specialist-a'],
+            },
+            tuning: {
+              orchestrator: { model: 'sonnet', thinkingLevel: 'off' },
+              reviewer: { configuredModel: 'haiku', model: 'haiku', thinkingLevel: 'off' },
+              specialist: { model: 'haiku', thinkingLevel: 'off' },
+              maxReviewRounds: 1,
+              maxSpecialistCalls: 4,
+              orchestratorMaxTurns: 4,
+              specialistMaxTurns: 4,
+            },
+          },
+        }),
+      );
+      expect(orchestration.some((q) => q.category === 'orchestration_ie')).toBe(true);
+      expect(orchestration.some((q) => q.category === 'basics')).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runSuite — abortController forwarding', () => {
+  it('forwards AbortController to single-mode task.abortController', async () => {
+    const h = harness();
+    const summary = await runSuite(cfg(), () => {}, h.deps);
+    try {
+      expect(h.tasks).toHaveLength(1);
+      expect(h.tasks[0]!.abortController).toBeInstanceOf(AbortController);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+
+  it('forwards AbortController and expect to masAnswerRunner.run', async () => {
+    const h = harness();
+    let capturedOpts: { abortController?: AbortController; expect?: string } | undefined;
+    h.deps.masAnswerRunner = {
+      run: async (_content, opts) => {
+        capturedOpts = opts;
+        return mkBundle({ answer: 'mas answer' });
+      },
+    };
+
+    const masCfg = cfg({
+      mode: 'mas',
+      mas: {
+        profile: {
+          orchestratorPlaybook: 'demo-basics',
+          reviewerPlaybook: 'demo-basics',
+          specialistPlaybooks: ['demo-basics'],
+        },
+        tuning: {
+          orchestrator: { model: 'sonnet', thinkingLevel: 'off' },
+          reviewer: { configuredModel: 'haiku', model: 'haiku', thinkingLevel: 'off' },
+          specialist: { model: 'haiku', thinkingLevel: 'off' },
+          maxReviewRounds: 1,
+          maxSpecialistCalls: 4,
+          orchestratorMaxTurns: 4,
+          specialistMaxTurns: 4,
+        },
+      },
+    });
+
+    const summary = await runSuite(masCfg, () => {}, h.deps);
+    try {
+      expect(capturedOpts?.abortController).toBeInstanceOf(AbortController);
+      expect(capturedOpts?.expect).toBe('answer');
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+});
+
+describe('Phase 3: Prompt provenance and metadata', () => {
+  const sha = (str: string) => createHash('sha256').update(str).digest('hex');
+
+  function makeTestEvalDir(categories: Record<string, Record<string, { playbook?: string | null }>>): string {
+    const dir = mkdtempSync(join(os.tmpdir(), 'yvoke-phase3-eval-'));
+    const specsYaml: Record<string, unknown> = {};
+    for (const [cat, questions] of Object.entries(categories)) {
+      specsYaml[cat] = {};
+      let md = `# ${cat}\n\n`;
+      for (const [qid, qspec] of Object.entries(questions)) {
+        (specsYaml[cat] as Record<string, unknown>)[qid] = {
+          playbook: qspec.playbook !== undefined ? qspec.playbook : undefined,
+        };
+        md += `## ${qid} — Question ${qid}\n\nQuestion text for ${qid}\n\n`;
+      }
+      writeFileSync(join(dir, `eval_${cat}.md`), md);
+    }
+    writeFileSync(join(dir, 'eval_specs.yaml'), JSON.stringify(specsYaml));
+    return dir;
+  }
+
+  function readMeta(runDir: string) {
+    return JSON.parse(readFileSync(join(runDir, 'run_meta.json'), 'utf8'));
+  }
+
+  it('Test 1 (Single playbook in merge mode - Hash what was sent)', async () => {
+    const evalDir = makeTestEvalDir({
+      c1: { Q1: { playbook: 'demo-basics' } },
+    });
+    const h = harness();
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'demo-basics', title: 'Basics', description: '', tools: [], systemPrompt: 'oim-structured', version: 2 },
+      ],
+      getText: async () => 'PLAYBOOK TEMPLATE',
+    };
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('oim-structured')) {
+        return new Response(JSON.stringify({ systemPrompt: 'STRUCTURED BASE' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const runCfg = cfg({ evalDir, merge: true, categories: ['c1'], limit: 0 });
+    const summary = await runSuite(runCfg, () => {}, h.deps);
+    try {
+      const meta = readMeta(summary.runDirs[0]!);
+      const sentPrompt = 'STRUCTURED BASE\n\n---\n\nPLAYBOOK TEMPLATE';
+      expect(meta.systemPromptName).toBe('oim-structured');
+      expect(meta.systemPromptSha).toBe(sha(sentPrompt));
+      expect(meta.systemPromptFallback).toBe(false);
+      expect(meta.playbookPrompts).toBeNull();
+      expect(meta.playbookVersion).toBe(2);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 2 (Designated prompt fallback)', async () => {
+    const evalDir = makeTestEvalDir({
+      c1: { Q1: { playbook: 'demo-basics' } },
+    });
+    const h = harness();
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'demo-basics', title: 'Basics', description: '', tools: [], systemPrompt: 'empty-chat' },
+      ],
+      getText: async () => 'PLAYBOOK TEMPLATE',
+    };
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('empty-chat')) {
+        return new Response(JSON.stringify({ systemPrompt: '' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const runCfg = cfg({ evalDir, merge: true, categories: ['c1'], limit: 0 });
+    const summary = await runSuite(runCfg, () => {}, h.deps);
+    try {
+      const meta = readMeta(summary.runDirs[0]!);
+      const expectedPrompt = 'DEFAULT BASE\n\n---\n\nPLAYBOOK TEMPLATE';
+      expect(meta.systemPromptName).toBe('default-chat');
+      expect(meta.systemPromptFallback).toBe(true);
+      expect(meta.systemPromptSha).toBe(sha(expectedPrompt));
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 3 (Transient fallback aggregation)', async () => {
+    const evalDir = makeTestEvalDir({
+      c1: { Q1: { playbook: 'demo-basics' }, Q2: { playbook: 'demo-basics' } },
+    });
+    const h = harness();
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'demo-basics', title: 'Basics', description: '', tools: [], systemPrompt: 'transient-chat' },
+      ],
+      getText: async () => 'PLAYBOOK TEMPLATE',
+    };
+    let transientCallCount = 0;
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('transient-chat')) {
+        transientCallCount++;
+        if (transientCallCount === 1) {
+          return new Response(JSON.stringify({ systemPrompt: '' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ systemPrompt: 'CUSTOM BASE' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const runCfg = cfg({ evalDir, merge: true, categories: ['c1'], limit: 0 });
+    const summary = await runSuite(runCfg, () => {}, h.deps);
+    try {
+      const meta = readMeta(summary.runDirs[0]!);
+      const fallbackSha = sha('DEFAULT BASE\n\n---\n\nPLAYBOOK TEMPLATE');
+      const customSha = sha('CUSTOM BASE\n\n---\n\nPLAYBOOK TEMPLATE');
+      expect(meta.systemPromptName).toBeNull();
+      expect(meta.systemPromptSha).toBeNull();
+      expect(meta.systemPromptVaried).toBe(true);
+      expect(meta.systemPromptFallback).toBe(true);
+      expect(meta.systemPromptShas).toHaveLength(2);
+      expect(meta.systemPromptShas).toContain(fallbackSha);
+      expect(meta.systemPromptShas).toContain(customSha);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 4 (Non-merge multi-category sweep)', async () => {
+    const evalDir = makeTestEvalDir({
+      catA: { Q1: { playbook: 'pbA' } },
+      catB: { Q1: { playbook: 'pbB' } },
+    });
+    const h = harness();
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'pbA', title: 'A', description: '', tools: [], systemPrompt: 'promptA' },
+        { name: 'pbB', title: 'B', description: '', tools: [], systemPrompt: 'promptB' },
+      ],
+      getText: async (name) => (name === 'pbA' ? 'PBA TEMPLATE' : 'PBB TEMPLATE'),
+    };
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('promptA')) return new Response(JSON.stringify({ systemPrompt: 'BASE A' }), { status: 200 });
+      if (urlStr.includes('promptB')) return new Response(JSON.stringify({ systemPrompt: 'BASE B' }), { status: 200 });
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const runCfg = cfg({ evalDir, merge: false, categories: ['catA', 'catB'], limit: 0 });
+    const summary = await runSuite(runCfg, () => {}, h.deps);
+    try {
+      expect(summary.runDirs).toHaveLength(2);
+      const meta0 = readMeta(summary.runDirs[0]!);
+      const meta1 = readMeta(summary.runDirs[1]!);
+      const [metaA, metaB] = meta0.playbooks.includes('pbA') ? [meta0, meta1] : [meta1, meta0];
+
+      expect(metaA.systemPromptName).toBe('promptA');
+      expect(metaA.systemPromptSha).toBe(sha('BASE A\n\n---\n\nPBA TEMPLATE'));
+      expect(metaA.systemPromptFallback).toBe(false);
+
+      expect(metaB.systemPromptName).toBe('promptB');
+      expect(metaB.systemPromptSha).toBe(sha('BASE B\n\n---\n\nPBB TEMPLATE'));
+      expect(metaB.systemPromptFallback).toBe(false);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 5 (Category without playbook & Sentinel check)', async () => {
+    const evalDir = makeTestEvalDir({
+      plain: { Q1: { playbook: null } },
+    });
+    const h = harness({ systemPrompt: 'DEFAULT BASE CHAT' });
+    const runCfg = cfg({ evalDir, merge: false, categories: ['plain'], limit: 0 });
+    const summary = await runSuite(runCfg, () => {}, h.deps);
+    try {
+      const raw = readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8');
+      const meta = JSON.parse(raw);
+      expect(meta.systemPromptName).toBe('default-chat');
+      expect(meta.systemPromptSha).toBe(sha('DEFAULT BASE CHAT'));
+      expect(raw).not.toContain('(none)');
+      expect(meta.playbooks).toEqual([]);
+      expect(meta.playbooks).not.toContain('_no_playbook');
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 6 (Multi-playbook in merge mode & _no_playbook preservation)', async () => {
+    const evalDir = makeTestEvalDir({
+      multi: {
+        Q1: { playbook: 'pb1' },
+        Q2: { playbook: 'pb2' },
+        Q3: { playbook: null },
+      },
+    });
+    const h = harness();
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'pb1', title: '1', description: '', tools: [], systemPrompt: 'sys1' },
+        { name: 'pb2', title: '2', description: '', tools: [], systemPrompt: 'sys2' },
+      ],
+      getText: async (name) => (name === 'pb1' ? 'TEXT 1' : 'TEXT 2'),
+    };
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('sys1')) return new Response(JSON.stringify({ systemPrompt: 'BASE 1' }), { status: 200 });
+      if (urlStr.includes('sys2')) return new Response(JSON.stringify({ systemPrompt: 'BASE 2' }), { status: 200 });
+      return new Response(JSON.stringify({ systemPrompt: 'BASE DEFAULT' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const runCfg = cfg({ evalDir, merge: true, categories: ['multi'], limit: 0 });
+    const summary = await runSuite(runCfg, () => {}, h.deps);
+    try {
+      const meta = readMeta(summary.runDirs[0]!);
+      expect(meta.systemPromptName).toBeNull();
+      expect(meta.systemPromptSha).toBeNull();
+      expect(meta.playbookPrompts).toBeDefined();
+      expect(meta.playbookPrompts['pb1']).toEqual({
+        systemPromptName: 'sys1',
+        systemPromptSha: sha('BASE 1\n\n---\n\nTEXT 1'),
+        systemPromptFallback: false,
+      });
+      expect(meta.playbookPrompts['pb2']).toEqual({
+        systemPromptName: 'sys2',
+        systemPromptSha: sha('BASE 2\n\n---\n\nTEXT 2'),
+        systemPromptFallback: false,
+      });
+      expect(meta.playbookPrompts['_no_playbook']).toEqual({
+        systemPromptName: 'default-chat',
+        systemPromptSha: sha('BASE DEFAULT'),
+        systemPromptFallback: false,
+      });
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 7 (MAS mode in merge run)', async () => {
+    const evalDir = makeTestEvalDir({
+      c1: { Q1: { playbook: 'demo-basics' } },
+    });
+    const h = harness();
+    h.deps.masAnswerRunner = {
+      run: async () => mkBundle({ answer: 'mas compose' }),
+    };
+    const masCfg = cfg({
+      evalDir,
+      mode: 'mas',
+      merge: true,
+      categories: ['c1'],
+      limit: 0,
+      mas: {
+        profile: {
+          orchestratorPlaybook: 'demo-basics',
+          reviewerPlaybook: 'demo-basics',
+          specialistPlaybooks: ['demo-basics'],
+        },
+        tuning: {
+          orchestrator: { model: 'sonnet', thinkingLevel: 'off' },
+          reviewer: { configuredModel: 'haiku', model: 'haiku', thinkingLevel: 'off' },
+          specialist: { model: 'haiku', thinkingLevel: 'off' },
+          maxReviewRounds: 1,
+          maxSpecialistCalls: 4,
+          orchestratorMaxTurns: 4,
+          specialistMaxTurns: 4,
+        },
+      },
+    });
+
+    const summary = await runSuite(masCfg, () => {}, h.deps);
+    try {
+      const meta = readMeta(summary.runDirs[0]!);
+      expect(meta.systemPromptName).toBeNull();
+      expect(meta.systemPromptSha).toBeNull();
+      expect(meta.playbookPrompts).toBeNull();
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 8 (MAS mode in non-merge category sweep)', async () => {
+    const evalDir = makeTestEvalDir({
+      m1: { Q1: { playbook: 'demo-basics' } },
+      m2: { Q1: { playbook: 'demo-basics' } },
+    });
+    const h = harness();
+    h.deps.masAnswerRunner = {
+      run: async () => mkBundle({ answer: 'mas compose' }),
+    };
+    const masCfg = cfg({
+      evalDir,
+      mode: 'mas',
+      merge: false,
+      categories: ['m1', 'm2'],
+      limit: 0,
+      mas: {
+        profile: {
+          orchestratorPlaybook: 'demo-basics',
+          reviewerPlaybook: 'demo-basics',
+          specialistPlaybooks: ['demo-basics'],
+        },
+        tuning: {
+          orchestrator: { model: 'sonnet', thinkingLevel: 'off' },
+          reviewer: { configuredModel: 'haiku', model: 'haiku', thinkingLevel: 'off' },
+          specialist: { model: 'haiku', thinkingLevel: 'off' },
+          maxReviewRounds: 1,
+          maxSpecialistCalls: 4,
+          orchestratorMaxTurns: 4,
+          specialistMaxTurns: 4,
+        },
+      },
+    });
+
+    const summary = await runSuite(masCfg, () => {}, h.deps);
+    try {
+      expect(summary.runDirs).toHaveLength(2);
+      for (const dir of summary.runDirs) {
+        const meta = readMeta(dir);
+        expect(meta.systemPromptName).toBeNull();
+        expect(meta.systemPromptSha).toBeNull();
+        expect(meta.systemPromptFallback).toBe(false);
+      }
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 9 (Two categories sharing a playbook)', async () => {
+    const evalDir = makeTestEvalDir({
+      full: { Q1: { playbook: 'oim-full' }, Q2: { playbook: 'oim-full' } },
+      full_ie: { Q1: { playbook: 'oim-full' }, Q2: { playbook: 'oim-full' } },
+    });
+    const h = harness();
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'oim-full', title: 'Full', description: '', tools: [], systemPrompt: 'oim-full' },
+      ],
+      getText: async () => 'FULL TEMPLATE',
+    };
+    let oimFullCalls = 0;
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('oim-full')) {
+        oimFullCalls++;
+        // Category `full` runs first (Q1, Q2): call 1 (Q1) returns empty, call 2 (Q2) returns custom
+        if (oimFullCalls === 1) {
+          return new Response(JSON.stringify({ systemPrompt: '' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ systemPrompt: 'FULL BASE' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const runCfg = cfg({ evalDir, merge: false, categories: ['full', 'full_ie'], limit: 0 });
+    const summary = await runSuite(runCfg, () => {}, h.deps);
+    try {
+      expect(summary.runDirs).toHaveLength(2);
+      const meta0 = readMeta(summary.runDirs[0]!);
+      const meta1 = readMeta(summary.runDirs[1]!);
+      const [metaFull, metaFullIe] = summary.runDirs[0]!.includes('__full') ? [meta0, meta1] : [meta1, meta0];
+
+      // Category full had transient fallback
+      expect(metaFull.systemPromptVaried).toBe(true);
+      expect(metaFull.systemPromptFallback).toBe(true);
+      expect(metaFull.systemPromptName).toBeNull();
+
+      // Category full_ie was unvaried and clean
+      expect(metaFullIe.systemPromptVaried).toBeUndefined();
+      expect(metaFullIe.systemPromptFallback).toBe(false);
+      expect(metaFullIe.systemPromptName).toBe('oim-full');
+      expect(metaFullIe.systemPromptSha).toBe(sha('FULL BASE\n\n---\n\nFULL TEMPLATE'));
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 10 (Mixed category with playbook and no-playbook questions)', async () => {
+    const evalDir = makeTestEvalDir({
+      mixed: {
+        Q1: { playbook: 'oim-structured' },
+        Q2: { playbook: null },
+      },
+    });
+    const h = harness();
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'oim-structured', title: 'Struct', description: '', tools: [], systemPrompt: 'oim-structured' },
+      ],
+      getText: async () => 'STRUCT TEMPLATE',
+    };
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('oim-structured')) {
+        return new Response(JSON.stringify({ systemPrompt: 'STRUCT BASE' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const runCfg = cfg({ evalDir, merge: false, categories: ['mixed'], limit: 0 });
+    const summary = await runSuite(runCfg, () => {}, h.deps);
+    try {
+      const meta = readMeta(summary.runDirs[0]!);
+      expect(meta.systemPromptName).toBeNull();
+      expect(meta.systemPromptSha).toBeNull();
+      expect(meta.playbookPrompts).toBeDefined();
+      expect(Object.keys(meta.playbookPrompts).sort()).toEqual(['_no_playbook', 'oim-structured']);
+      expect(meta.playbooks).toEqual(['oim-structured']);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+});
+

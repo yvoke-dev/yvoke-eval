@@ -19,6 +19,7 @@ describe('gradeOne', () => {
     expect(r.error).toBeNull();
     expect(r.answer).toBe(GOOD_ANSWER.bundle.answer);
     expect(r.signals.retrievedChunkCount).toBe(1);
+    expect(r.retrievedChunkIds).toEqual(GOOD_ANSWER.bundle.retrievedChunkIds);
     expect(r.promptTokens).toBe(1200);
     expect(r.totalTokens).toBe(1500);
     expect(r.latencyMs).toBe(1234);
@@ -32,17 +33,30 @@ describe('gradeOne', () => {
     expect(r.verdict.verdict).toBe('FAIL');
   });
 
-  it('never throws — a judge failure yields an ERROR verdict with must_include echoed as missing', async () => {
+  it('never throws — a judge failure yields an ERROR verdict without echoing must_include', async () => {
     const throwingJudge: Judge = {
       async review() {
         throw new Error('judge exploded');
       },
     };
     const q = mkQuestion({ mustInclude: ['Manager', 'Designer'] });
-    const r = await gradeOne(q, mkBundle({ answer: 'x' }), throwingJudge, 5);
+    const r = await gradeOne(q, mkBundle({ answer: 'x', retrievedChunkIds: ['err-chunk-1'] }), throwingJudge, 5);
     expect(r.verdict.verdict).toBe('ERROR');
     expect(r.error).toContain('judge exploded');
-    expect(r.signals.mustIncludeMissing).toEqual(['Manager', 'Designer']);
+    expect(r.signals.mustIncludeMissing).toEqual([]);
     expect(r.totalTokens).toBe(0);
+    expect(r.retrievedChunkIds).toEqual(['err-chunk-1']);
+  });
+
+  it('preserves judge ERROR verdict on critical question without overwriting to FAIL', async () => {
+    const errorJudge: Judge = {
+      async review() {
+        return { verdict: 'ERROR', dimensions: {}, reasoning: 'quota limit reached', evidence: [] };
+      },
+    };
+    const q = mkQuestion({ critical: true, mustInclude: ['MustBePresent'] });
+    const r = await gradeOne(q, mkBundle({ answer: 'nothing here' }), errorJudge, 5);
+    expect(r.verdict.verdict).toBe('ERROR');
+    expect(r.error).toBe('quota limit reached');
   });
 });
