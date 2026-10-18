@@ -35,9 +35,9 @@ function stubSystemPromptClient(reply: Record<string, string | null | Error>) {
 }
 
 describe('buildEvalTask — Prompt Assembly & Clean User Message (R1)', () => {
-  it('combines baseSystemPrompt and playbookText separated by \\n\\n---\\n\\n', async () => {
+  it('combines baseSystemPrompt and playbookText separated by \\n\\n---\\n\\n and forwards playbookVersion', async () => {
     const q = mkQuestion({ playbook: 'demo-basics' });
-    const prompts = mkPrompts([{ name: 'demo-basics', title: 'Basics', description: '' }], 'PLAYBOOK TEXT');
+    const prompts = mkPrompts([{ name: 'demo-basics', title: 'Basics', description: '', version: 2 }], 'PLAYBOOK TEXT');
     const task = await buildEvalTask(q, prompts, {
       answerModel: 'sonnet',
       thinkingLevel: 'low',
@@ -47,6 +47,7 @@ describe('buildEvalTask — Prompt Assembly & Clean User Message (R1)', () => {
     expect(task.systemPrompt).toBe('GROUNDING RULES\n\n---\n\nPLAYBOOK TEXT');
     expect(task.modelContent).toBe(q.question);
     expect(task.modelContent).not.toContain('PLAYBOOK TEXT');
+    expect(task.playbookVersion).toBe(2);
   });
 
   it('leaves baseSystemPrompt as-is when question has no playbook', async () => {

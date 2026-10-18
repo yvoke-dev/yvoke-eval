@@ -35,6 +35,7 @@ export interface EvalTask {
   abortController?: AbortController;
   systemPromptName?: string | null;
   systemPromptFallback?: boolean;
+  playbookVersion?: number | null;
 }
 
 /** Provider-agnostic result of producing one answer — the sole input to signal extraction. */

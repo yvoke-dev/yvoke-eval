@@ -88,4 +88,29 @@ describe('AgentSdkStructuredModel', () => {
 
     expect(res).toEqual({ verdict: 'FAIL', dimensions: {}, reasoning: 'failed' });
   });
+
+  it('uses configured thinkingLevel for maxThinkingTokens when provided', async () => {
+    capturedCalls.length = 0;
+    queryYields = [
+      {
+        type: 'result',
+        result: '{"verdict":"PASS","dimensions":{},"reasoning":"ok"}',
+      },
+    ];
+
+    const model = new AgentSdkStructuredModel({ sandboxDir: '/tmp/test-sandbox', thinkingLevel: 'medium' });
+    await model.complete({
+      system: 'RUBRIC',
+      user: 'QUESTION',
+      model: 'claude-sonnet-5-5',
+      temperature: 0,
+      maxTokens: 1024,
+      toolName: 'record_verdict',
+      schema: {},
+    });
+
+    expect(capturedCalls).toHaveLength(1);
+    expect(capturedCalls[0]!.options.maxThinkingTokens).toBe(10_000);
+  });
 });
+

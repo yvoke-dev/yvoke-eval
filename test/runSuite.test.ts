@@ -646,7 +646,7 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     h.deps.prompts = {
       ...h.deps.prompts!,
       list: async () => [
-        { name: 'demo-basics', title: 'Basics', description: '', tools: [], systemPrompt: 'oim-structured' },
+        { name: 'demo-basics', title: 'Basics', description: '', tools: [], systemPrompt: 'oim-structured', version: 2 },
       ],
       getText: async () => 'PLAYBOOK TEMPLATE',
     };
@@ -667,6 +667,7 @@ describe('Phase 3: Prompt provenance and metadata', () => {
       expect(meta.systemPromptSha).toBe(sha(sentPrompt));
       expect(meta.systemPromptFallback).toBe(false);
       expect(meta.playbookPrompts).toBeNull();
+      expect(meta.playbookVersion).toBe(2);
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
       rmSync(evalDir, { recursive: true, force: true });

@@ -107,6 +107,21 @@ describe('toRunConfig — grader rubrics are required, never defaulted', () => {
     expect(rc.answerModel).toBe('claude-haiku-5-5');
     expect(rc.reviewerModel).toBe('claude-sonnet-5-5');
   });
+
+  it('resolves reviewer.thinkingLevel from config and CLI override, defaulting to low', () => {
+    expect(toRunConfig(cfg(), {}, CONTENT).reviewerThinkingLevel).toBe('low');
+    const withMedium = cfg({
+      reviewer: {
+        provider: 'claude',
+        model: 'sonnet',
+        thinkingLevel: 'medium',
+        temperature: 0,
+        promptFile: './graders/reviewer.md',
+      },
+    });
+    expect(toRunConfig(withMedium, {}, CONTENT).reviewerThinkingLevel).toBe('medium');
+    expect(toRunConfig(withMedium, { 'reviewer-thinking': 'high' }, CONTENT).reviewerThinkingLevel).toBe('high');
+  });
 });
 
 describe('normalizeModelName', () => {

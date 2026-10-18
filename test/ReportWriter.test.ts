@@ -162,6 +162,30 @@ describe('ReportWriter — run folder', () => {
       rmSync(overviewPath, { force: true });
     }
   });
+
+  it('renders playbookVersion in summary.md and OVERVIEW.md Playbook Version column', () => {
+    const results = JSON.parse(readFileSync(baselineResults, 'utf8')) as EvalResult[];
+    const meta = {
+      answerModel: 'claude-haiku-5-5',
+      reviewerModel: 'claude-sonnet-5-5',
+      thinkingLevel: 'high',
+      playbookVersion: 2,
+      gitSha: 'testsha',
+    };
+    const overviewPath = join(evalDir, 'runs', 'OVERVIEW.md');
+    const { runDir } = new ReportWriter().write(evalDir, meta, results);
+    try {
+      const summary = readFileSync(join(runDir, 'summary.md'), 'utf8');
+      expect(summary).toContain('- playbook version: `v2`');
+
+      const overview = readFileSync(overviewPath, 'utf8');
+      expect(overview).toContain('| Date (UTC) | Run ID | Mode | Playbook Version | Category / Scope |');
+      expect(overview).toContain('| single | v2 | basics (3 Qs) |');
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+      rmSync(overviewPath, { force: true });
+    }
+  });
 });
 
 describe('formatModelDisplay', () => {

@@ -81,6 +81,7 @@ export async function buildEvalTask(
   let playbookTools: string[] | undefined;
   let codeExecution = true;
   let designatedSystemPrompt: string | undefined;
+  let playbookVersion: number | null = null;
 
   if (q.playbook) {
     const list = await prompts.list();
@@ -88,6 +89,7 @@ export async function buildEvalTask(
     playbookTools = info?.tools;
     codeExecution = info?.codeExecution !== false;
     designatedSystemPrompt = info?.systemPrompt;
+    playbookVersion = info?.version ?? null;
     template = await prompts.getText(q.playbook);
   }
 
@@ -115,5 +117,6 @@ export async function buildEvalTask(
     codeExecution,
     systemPromptName: resolved.name,
     systemPromptFallback: resolved.fallback,
+    playbookVersion,
   };
 }

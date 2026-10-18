@@ -37,6 +37,7 @@ export const CLI_OPTIONS = {
   limit: { type: 'string' },
   'answer-model': { type: 'string' },
   'reviewer-model': { type: 'string' },
+  'reviewer-thinking': { type: 'string' },
   thinking: { type: 'string' },
   mode: { type: 'string' },
   eval: { type: 'string' },
@@ -297,6 +298,7 @@ export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, co
     answerModel: normalizeModelName((values['answer-model'] as string | undefined) ?? cfg.answer?.model ?? 'sonnet'),
     thinkingLevel: parseThinkingLevel(values['thinking'] ?? cfg.answer?.thinkingLevel),
     reviewerModel: normalizeModelName((values['reviewer-model'] as string | undefined) ?? cfg.reviewer?.model ?? 'opus'),
+    reviewerThinkingLevel: parseThinkingLevel(values['reviewer-thinking'] ?? cfg.reviewer?.thinkingLevel),
     mcp: {
       serverBaseUrl: cfg.mcp?.serverBaseUrl ?? 'http://localhost:8080',
       bearer: cfg.mcp?.bearer ?? 'dev-local-token',

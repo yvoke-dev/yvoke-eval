@@ -49,6 +49,7 @@ export interface RunConfig {
   /** The deployment's web allow-list; empty/absent makes web access fail closed. */
   webAllowedDomains: string[];
   reviewerModel: string;
+  reviewerThinkingLevel?: ThinkingLevel;
   graderPath: string;
   /** Only needed for `evalIntent: 'orchestration'`; null for every other intent. */
   orchestrationGraderPath: string | null;
@@ -178,7 +179,10 @@ export async function runSuite(
     throw new UserError('orchestration eval needs reviewer.orchestrationPromptFile in the eval config.');
   }
   const grader = loadGrader(graderPath);
-  const structuredModel = new AgentSdkStructuredModel({ sandboxDir: cfg.sandboxDir });
+  const structuredModel = new AgentSdkStructuredModel({
+    sandboxDir: cfg.sandboxDir,
+    thinkingLevel: cfg.reviewerThinkingLevel ?? 'low',
+  });
   const judge = deps.judge ?? new ClaudeJudge(structuredModel, { model: cfg.reviewerModel, systemPrompt: grader.prompt });
   const orchJudge: OrchestrationJudge | null =
     deps.orchJudge ??
@@ -229,6 +233,7 @@ export async function runSuite(
 
   const categoryPrompts = new Map<string, PromptEntry>(); // keyed by `${q.category}::${pbKey}`
   const mergedPlaybookPrompts = new Map<string, PromptEntry>(); // keyed by pbKey
+  const playbookVersions = new Map<string, number>();
 
   // Build the answer producer for the selected mode.
   let produce: (q: EvalQuestion, ac: AbortController) => Promise<AnswerBundle>;
@@ -264,6 +269,10 @@ export async function runSuite(
         systemPromptClient,
       });
       task.abortController = ac;
+
+      if (q.playbook && typeof task.playbookVersion === 'number') {
+        playbookVersions.set(q.playbook, task.playbookVersion);
+      }
 
       const pbKey = q.playbook ?? '_no_playbook';
       const catKey = `${q.category}::${pbKey}`;
@@ -311,12 +320,12 @@ export async function runSuite(
                 },
                 ac,
               ),
-            120_000,
+            180_000,
             `grading orchestration ${q.category}.${q.id}`,
           )
         : await withTimeout(
             (ac) => gradeOne(q, bundle, judge, Date.now() - t0, ac),
-            120_000,
+            180_000,
             `grading ${q.category}.${q.id}`,
           );
     } catch (e) {
@@ -341,6 +350,15 @@ export async function runSuite(
   const resolvedJudgeModel = activeJudge?.resolvedModel ?? (judge as { resolvedModel?: string })?.resolvedModel;
 
   const allPlaybooks = [...new Set(results.map((r) => r.question.playbook).filter((p): p is string => Boolean(p)))];
+
+  function resolvePlaybookVersion(playbooks: string[]): number | null {
+    const versions = new Set<number>();
+    for (const pb of playbooks) {
+      const v = playbookVersions.get(pb);
+      if (typeof v === 'number') versions.add(v);
+    }
+    return versions.size === 1 ? ([...versions][0] ?? null) : null;
+  }
 
   let rootPromptMeta: {
     systemPromptName: string | null;
@@ -395,11 +413,13 @@ export async function runSuite(
     reviewerModel: cfg.reviewerModel,
     resolvedReviewerModel: resolvedJudgeModel ?? null,
     reviewerProvider: 'claude',
+    reviewerThinkingLevel: cfg.reviewerThinkingLevel ?? 'low',
     thinkingLevel: thinkingLabel,
     ...rootPromptMeta,
     graderPromptSha: grader.sha,
     gitSha: sutSha,
     playbooks: allPlaybooks,
+    playbookVersion: resolvePlaybookVersion(allPlaybooks),
     masReviewerModel:
       cfg.mode === 'mas'
         ? (cfg.mas?.tuning.reviewer.configuredModel ?? cfg.mas?.tuning.reviewer.model ?? null)
@@ -468,6 +488,7 @@ export async function runSuite(
         ...meta,
         ...catPromptMeta,
         playbooks: catPlaybooks,
+        playbookVersion: resolvePlaybookVersion(catPlaybooks),
       };
       if (!catPromptMeta.systemPromptVaried) {
         delete (catMeta as any).systemPromptVaried;

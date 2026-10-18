@@ -38,6 +38,7 @@ export interface EvalConfig {
   reviewer: {
     provider: string;
     model: string;
+    thinkingLevel?: string;
     temperature: number;
     promptFile: string;
     /** Orchestration eval (Mode 3) grader rubric. Required only for `run.eval: orchestration`. */
