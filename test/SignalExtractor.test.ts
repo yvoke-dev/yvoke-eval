@@ -116,6 +116,67 @@ describe('extractSignals', () => {
     expect(s.hasCitations).toBe(true);
   });
 
+  it('records retrievedCollections from non-empty search_graph_entities and get_graph_neighbors calls', () => {
+    const s = extractSignals(
+      mkQuestion(),
+      mkBundle({
+        answer: 'QBM_GetConfigParmValue uses Session.Config().GetConfigParm.',
+        toolCalls: [
+          {
+            name: 'mcp__yvoke__search_graph_entities',
+            argumentsJson: JSON.stringify({
+              collection: 'OIM - Custom - Install Kit',
+              kind: 'script',
+              query: 'QBM_GetConfigParmValue',
+              tag: '9.3.1',
+            }),
+            resultText: JSON.stringify(
+              '### Graph Entities (1 match)\n| entity_name | kind | document_id |\n| --- | --- | --- |\n| QBM_GetConfigParmValue | script | 76430187-7367-513d-be75-ccbd6c30dd13 |',
+            ),
+            isError: false,
+          },
+        ],
+        retrievedChunkIds: [],
+      }),
+    );
+    expect(s.retrievedCollections).toEqual(['OIM - Custom - Install Kit']);
+  });
+
+  it('does not record retrievedCollections from empty or no-match graph calls', () => {
+    const s = extractSignals(
+      mkQuestion(),
+      mkBundle({
+        answer: 'No such entity.',
+        toolCalls: [
+          {
+            name: 'mcp__yvoke__search_graph_entities',
+            argumentsJson: JSON.stringify({
+              collection: 'OIM - Custom - Install Kit',
+              kind: 'tool',
+              query: 'SchemaWizard.exe',
+              tag: '9.3.1',
+            }),
+            resultText: JSON.stringify("No graph entities found matching 'SchemaWizard.exe'"),
+            isError: false,
+          },
+          {
+            name: 'mcp__yvoke__get_graph_neighbors',
+            argumentsJson: JSON.stringify({
+              collection: 'OIM - Custom - Install Kit',
+              entity_name: 'PersonMasterDataApi',
+              kind: 'api',
+              tag: '9.3.1',
+            }),
+            resultText: JSON.stringify('(no relationships found)'),
+            isError: false,
+          },
+        ],
+        retrievedChunkIds: [],
+      }),
+    );
+    expect(s.retrievedCollections).toEqual([]);
+  });
+
   it('detects a References section without numbered markers as citations', () => {
     const s = extractSignals(mkQuestion(), mkBundle({ answer: 'text\n\n## References\n- a manual' }));
     expect(s.hasCitations).toBe(true);

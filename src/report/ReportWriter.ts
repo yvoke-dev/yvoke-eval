@@ -30,7 +30,7 @@ export class ReportWriter {
     const model = String(meta['answerModel'] ?? 'model');
     const provided = meta['gitSha'];
     const sha = provided != null && String(provided).length > 0 ? String(provided) : gitSha(evalDir);
-    const id = runId ?? newRunId(model, sha);
+    const id = runId ?? newRunId(model, sha, meta['answerProvider']);
     const ts = timestampOf(id);
     const runDir = join(evalDir, 'runs', id);
     mkdirSync(runDir, { recursive: true });
@@ -66,7 +66,10 @@ export class ReportWriter {
     const overviewPath = join(runsDir, 'OVERVIEW.md');
     const exists = existsSync(overviewPath);
 
-    const mode = String(meta['evalIntent'] ?? meta['answerProvider'] ?? 'single');
+    const mode =
+      meta['answerProvider'] === 'web-single'
+        ? 'specialist (web)'
+        : String(meta['evalIntent'] ?? meta['answerProvider'] ?? 'single');
     const playbookVersion = formatPlaybookVersion(meta['playbookVersion']);
     const answerModel = formatModelDisplay(String(meta['answerModel'] ?? 'model'), meta['resolvedAnswerModel']);
     const reviewerModel = formatModelDisplay(String(meta['reviewerModel'] ?? 'reviewer'), meta['resolvedReviewerModel']);
@@ -130,8 +133,10 @@ export function formatModelDisplay(model: string, resolved?: unknown): string {
 }
 
 /** Build one run id for a whole run. Call ONCE per `runSuite`, then pass it to every `write`. */
-export function newRunId(answerModel: string, gitSha: string): string {
-  return `${formatTimestamp(new Date())}__${sanitize(answerModel)}__${gitSha}`;
+export function newRunId(answerModel: string, gitSha: string, answerProvider?: unknown): string {
+  const isWeb = String(answerProvider ?? '').startsWith('web-');
+  const slug = isWeb ? `web-${sanitize(answerModel)}` : sanitize(answerModel);
+  return `${formatTimestamp(new Date())}__${slug}__${gitSha}`;
 }
 
 /** The `<timestamp>__<model>__<sha>` prefix, so run_meta.timestamp matches the folder it sits in. */
@@ -158,7 +163,10 @@ export function renderSummary(meta: Record<string, unknown>, results: EvalResult
     totalLatencyMs += r.latencyMs ?? 0;
   }
 
-  const mode = String(meta['evalIntent'] ?? meta['answerProvider'] ?? 'single');
+  const mode =
+    meta['answerProvider'] === 'web-single'
+      ? 'specialist (web)'
+      : String(meta['evalIntent'] ?? meta['answerProvider'] ?? 'single');
   const playbookVersion = formatPlaybookVersion(meta['playbookVersion']);
   const answerModel = formatModelDisplay(String(meta['answerModel'] ?? 'model'), meta['resolvedAnswerModel']);
   const reviewerModel = formatModelDisplay(String(meta['reviewerModel'] ?? 'reviewer'), meta['resolvedReviewerModel']);
@@ -174,6 +182,15 @@ export function renderSummary(meta: Record<string, unknown>, results: EvalResult
     sb += `- playbook version: \`${playbookVersion}\`\n`;
   }
   sb += `- answer model: \`${answerModel}\` (thinking: \`${thinkingLevel}\`)\n`;
+  if (typeof meta['webBaseUrl'] === 'string' && meta['webBaseUrl'].length > 0) {
+    sb += `- web target: \`${meta['webBaseUrl']}\`${meta['promptMetadataSource'] === 'mcp-cross-origin' ? ` (prompt metadata from MCP \`${meta['mcpServerBaseUrl']}\` — cross-origin)` : ''}\n`;
+  }
+  if (typeof meta['webServerVersion'] === 'string' && meta['webServerVersion'].length > 0) {
+    sb += `- web server version: \`${meta['webServerVersion']}\`\n`;
+  }
+  if (typeof meta['mcpGitSha'] === 'string' && meta['mcpGitSha'].length > 0) {
+    sb += `- mcp git: \`${meta['mcpGitSha']}\`\n`;
+  }
   sb += `- reviewer model: \`${reviewerModel}\`\n`;
   if (masReviewer !== '—') {
     sb += `- mas reviewer: \`${masReviewer}\`\n`;

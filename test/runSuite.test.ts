@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, rmSync, mkdtempSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -19,7 +19,7 @@ import { SYSTEM_PROMPT_NAME } from '../src/server/SystemPromptClient';
 import type { PromptSource } from '../src/mcp/McpPrompts';
 import type { EvalTask } from '../src/agent/AnswerBundle';
 import type { Judge } from '../src/reviewer/Judge';
-import { UserError } from '../src/types';
+import { FatalRunError, UserError } from '../src/types';
 import { mkBundle } from './fixtures';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
@@ -1047,5 +1047,994 @@ describe('Phase 3: Prompt provenance and metadata', () => {
       rmSync(evalDir, { recursive: true, force: true });
     }
   });
+
+  it('Test 11 (Web provider defaultPlaybook propagation across all 4 metadata sites in merge: true and merge: false)', async () => {
+    const evalDir = makeTestEvalDir({
+      getting_started: {
+        Q1: { playbook: null },
+        Q2: { playbook: null },
+      },
+      coding: {
+        Q1: { playbook: 'oim-coding' },
+      },
+    });
+    const h = harness();
+    let preflightCalled = false;
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'oim-full', title: 'Full', description: '', tools: [], systemPrompt: 'oim-full-sys', version: 2 },
+        { name: 'oim-coding', title: 'Coding', description: '', tools: [], systemPrompt: 'oim-coding-sys', version: 3 },
+      ],
+      getText: async (name) => (name === 'oim-full' ? 'FULL PLAYBOOK TEXT' : 'CODING PLAYBOOK TEXT'),
+    };
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('oim-full-sys')) return new Response(JSON.stringify({ systemPrompt: 'FULL SYS' }), { status: 200 });
+      if (urlStr.includes('oim-coding-sys')) return new Response(JSON.stringify({ systemPrompt: 'CODING SYS' }), { status: 200 });
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT SYS' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    h.deps.answerRunner = {
+      preflight: async () => {
+        preflightCalled = true;
+      },
+      run: async (task) =>
+        mkBundle({
+          answer: 'web answer',
+          providerMeta: {
+            resolvedModel: 'gemini-3.8-flash-001',
+            playbook: task.question.playbook,
+            playbookVersion: task.question.playbook === 'oim-full' ? 7 : 3,
+          },
+        }),
+    };
+
+    const webCfgBase = cfg({
+      evalDir,
+      provider: 'web',
+      answerModel: 'gemini-3.8-flash',
+      categories: ['getting_started', 'coding'],
+      limit: 0,
+      web: {
+        baseUrl: 'http://localhost:8080',
+        defaultPlaybook: 'oim-full',
+        pollIntervalMs: 10,
+        keepConversations: false,
+      },
+    });
+
+    // 1. Non-merge mode (per-category run_meta.json)
+    const summaryNonMerge = await runSuite({ ...webCfgBase, merge: false }, () => {}, h.deps);
+    // 2. Merge mode (root run_meta.json)
+    const summaryMerge = await runSuite({ ...webCfgBase, merge: true }, () => {}, h.deps);
+    try {
+      expect(preflightCalled).toBe(true);
+      expect(summaryNonMerge.runDirs).toHaveLength(2);
+      for (const dir of summaryNonMerge.runDirs) {
+        expect(dir).toContain('__web-gemini-3.8-flash__');
+      }
+
+      const gsDir = summaryNonMerge.runDirs.find((d) => d.endsWith('__getting_started'))!;
+      const gsMeta = readMeta(gsDir);
+      expect(gsMeta.answerProvider).toBe('web-single');
+      expect(gsMeta.sdkModel).toBeUndefined();
+      expect(gsMeta.sdkVersion).toBeUndefined();
+      expect(gsMeta.resolvedAnswerModel).toBe('gemini-3.8-flash-001');
+      // defaultPlaybook propagated to catPlaybooks, playbookVersion (from web trace = 7), and systemPromptSha:
+      expect(gsMeta.playbooks).toEqual(['oim-full']);
+      expect(gsMeta.playbookVersion).toBe(7);
+      expect(gsMeta.systemPromptName).toBe('oim-full-sys');
+      expect(gsMeta.systemPromptSha).toBe(sha('FULL SYS\n\n---\n\nFULL PLAYBOOK TEXT'));
+
+      // Meanwhile results.json preserves the original spec question.playbook === null:
+      const gsResults = JSON.parse(readFileSync(join(gsDir, 'results.json'), 'utf8'));
+      expect(gsResults[0].question.playbook).toBeNull();
+
+      // Merge mode root run_meta.json:
+      expect(summaryMerge.runDirs[0]).toContain('__web-gemini-3.8-flash__');
+      const rootMeta = readMeta(summaryMerge.runDirs[0]!);
+      expect(rootMeta.answerProvider).toBe('web-single');
+      expect(rootMeta.playbooks.sort()).toEqual(['oim-coding', 'oim-full']);
+      expect(Object.keys(rootMeta.playbookPrompts).sort()).toEqual(['oim-coding', 'oim-full']);
+      expect(rootMeta.playbookPrompts['oim-full']).toEqual({
+        systemPromptName: 'oim-full-sys',
+        systemPromptSha: sha('FULL SYS\n\n---\n\nFULL PLAYBOOK TEXT'),
+        systemPromptFallback: false,
+      });
+    } finally {
+      summaryNonMerge.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      summaryMerge.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
 });
 
+describe('runSuite — FatalRunError aborts question loop on first question', () => {
+  it('stops immediately on the first question and sets summary.aborted and summary.abortReason', async () => {
+    const h = harness();
+    let runnerCalls = 0;
+    h.deps.answerRunner = {
+      run: async () => {
+        runnerCalls++;
+        throw new FatalRunError(
+          'yvoke-web returned 0 toolCalls in trace despite tool activity in the message. Start yvoke-web with APP_CHAT_TRACE_TOOL_CALLS=true (app.chat.trace-tool-calls=true).',
+        );
+      },
+    };
+
+    const logs: string[] = [];
+    // limit: 0 on basics has 6 questions; FatalRunError on Q1 must abort before Q2
+    const summary = await runSuite(cfg({ limit: 0 }), (m) => logs.push(m), h.deps);
+    try {
+      expect(runnerCalls).toBe(1);
+      expect(summary.total).toBe(1);
+      expect(summary.error).toBe(1);
+      expect(summary.aborted).toBe(true);
+      expect(summary.abortReason).toContain('APP_CHAT_TRACE_TOOL_CALLS=true');
+      expect(logs.some((l) => l.includes('[ABORT]') && l.includes('APP_CHAT_TRACE_TOOL_CALLS=true'))).toBe(true);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+});
+
+describe('runSuite — production WebAnswerRunner wiring', () => {
+  function makeWebEvalDir(categories: Record<string, Record<string, { playbook?: string | null }>>): string {
+    const dir = mkdtempSync(join(os.tmpdir(), 'yvoke-web-wiring-'));
+    const specsYaml: Record<string, unknown> = {};
+    for (const [cat, questions] of Object.entries(categories)) {
+      specsYaml[cat] = {};
+      let md = `# ${cat}\n\n`;
+      for (const [qid, qspec] of Object.entries(questions)) {
+        (specsYaml[cat] as Record<string, unknown>)[qid] = {
+          ...(qspec.playbook !== undefined ? { playbook: qspec.playbook } : {}),
+        };
+        md += `## ${qid} — Question ${qid}\n\nQuestion text for ${cat}.${qid}\n\n`;
+      }
+      writeFileSync(join(dir, `eval_${cat}.md`), md);
+    }
+    writeFileSync(join(dir, 'eval_specs.yaml'), JSON.stringify(specsYaml));
+    return dir;
+  }
+
+  interface FakeWebServerOpts {
+    webPlaybooks?: string[];
+    buildVersionSpan?: string;
+    appVersionHeader?: string;
+    onSendAsync?: (convId: string, qIndex: number) => Promise<Response> | Response;
+    onStatus?: (convId: string, msgId: string, qIndex: number) => Promise<Response> | Response;
+    onTrace?: (convId: string, msgId: string, qIndex: number) => Promise<Response> | Response;
+    stopDelayMs?: number;
+    deleteDelayMs?: number;
+    events?: string[];
+  }
+
+  function createFakeWebAndPromptFetch(opts: FakeWebServerOpts = {}) {
+    const playbooks = opts.webPlaybooks ?? ['oim-coding', 'oim-full', 'demo-basics'];
+    const events = opts.events ?? [];
+    const sentPrompts: Array<{ convId: string; promptName: string; content: string }> = [];
+    const stoppedConvs = new Set<string>();
+    let convCounter = 0;
+    const convToQIndex = new Map<string, number>();
+    let questionConvCount = 0;
+
+    const withVersion = (headers: Record<string, string> = {}) =>
+      opts.appVersionHeader ? { ...headers, 'X-App-Version': opts.appVersionHeader } : headers;
+    const versionSpanHtml = opts.buildVersionSpan
+      ? `<span class="build-version"\n  title="${opts.buildVersionSpan}">${opts.buildVersionSpan}</span>`
+      : '';
+
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+
+      // SystemPromptClient REST endpoint:
+      if (url.includes('/api/chat/v1/prompts/system/')) {
+        return new Response(JSON.stringify({ systemPrompt: 'WEB BASE SYSTEM PROMPT' }), { status: 200 });
+      }
+
+      if (url.endsWith('/login') && method === 'GET') {
+        // /login never exposes build-version span in real yvoke-web:
+        return new Response(
+          '<html><body><form><input name="username"><input name="password"><input name="_csrf" value="csrf-login"></form></body></html>',
+          {
+            status: 200,
+            headers: { 'Set-Cookie': 'JSESSIONID=pre-auth; Path=/' },
+          },
+        );
+      }
+
+      if (url.endsWith('/login') && method === 'POST') {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            Location: '/chat',
+            'Set-Cookie': 'JSESSIONID=post-auth; Path=/',
+          },
+        });
+      }
+
+      if (url.endsWith('/chat') && method === 'GET') {
+        return new Response(
+          `<html><head><meta name="_csrf" content="csrf-chat"><meta name="_csrf_header" content="X-CSRF-TOKEN"></head><body>Chat ${versionSpanHtml}</body></html>`,
+          { status: 200, headers: withVersion() },
+        );
+      }
+
+      if (url.endsWith('/chat/new') && method === 'POST') {
+        convCounter++;
+        const convId = `conv-${convCounter}`;
+        // conv-1 is always preflight; conv-2+ are per-question runs
+        if (convCounter >= 2) {
+          questionConvCount++;
+          convToQIndex.set(convId, questionConvCount);
+          events.push(`q${questionConvCount}:create:${convId}`);
+        } else {
+          events.push(`preflight:create:${convId}`);
+        }
+        return new Response(null, {
+          status: 302,
+          headers: withVersion({ Location: `/chat/${convId}` }),
+        });
+      }
+
+      // Preflight GET /chat/conv-1
+      const threadMatch = /\/chat\/(conv-\d+)$/.exec(url);
+      if (threadMatch && method === 'GET') {
+        const promptsJson = JSON.stringify(playbooks.map((name) => ({ name })));
+        return new Response(
+          `<html><head><meta name="_csrf" content="csrf-thread"></head><body>${versionSpanHtml}<script>window.CHAT_CONFIG = { prompts: ${promptsJson} };</script></body></html>`,
+          { status: 200, headers: withVersion() },
+        );
+      }
+
+      // Preflight trace probe:
+      if (url.includes('/messages/00000000-0000-0000-0000-000000000000/trace')) {
+        return new Response(null, { status: 404, headers: withVersion() });
+      }
+
+      if ((url.endsWith('/model') || url.endsWith('/thinking-level')) && method === 'POST') {
+        return new Response(null, { status: 200, headers: withVersion() });
+      }
+
+      const sendMatch = /\/chat\/(conv-\d+)\/send-async$/.exec(url);
+      if (sendMatch && method === 'POST') {
+        const convId = sendMatch[1]!;
+        const qIdx = convToQIndex.get(convId) ?? 1;
+        const params = new URLSearchParams(String(init?.body ?? ''));
+        sentPrompts.push({
+          convId,
+          promptName: params.get('promptName') ?? '',
+          content: params.get('content') ?? '',
+        });
+        if (opts.onSendAsync) {
+          return await opts.onSendAsync(convId, qIdx);
+        }
+        return new Response(JSON.stringify({ assistantMessageId: `msg-q${qIdx}` }), {
+          status: 202,
+          headers: withVersion(),
+        });
+      }
+
+      const statusMatch = /\/chat\/(conv-\d+)\/messages\/([^/]+)\/status$/.exec(url);
+      if (statusMatch && method === 'GET') {
+        const convId = statusMatch[1]!;
+        const msgId = statusMatch[2]!;
+        const qIdx = convToQIndex.get(convId) ?? 1;
+        if (opts.onStatus) {
+          return await opts.onStatus(convId, msgId, qIdx);
+        }
+        return new Response(JSON.stringify({ status: 'done' }), { status: 200, headers: withVersion() });
+      }
+
+      const traceMatch = /\/chat\/(conv-\d+)\/messages\/([^/]+)\/trace$/.exec(url);
+      if (traceMatch && method === 'GET') {
+        const convId = traceMatch[1]!;
+        const msgId = traceMatch[2]!;
+        const qIdx = convToQIndex.get(convId) ?? 1;
+        if (opts.onTrace) {
+          return await opts.onTrace(convId, msgId, qIdx);
+        }
+        return new Response(
+          JSON.stringify({
+            mode: 'single',
+            conversationId: convId,
+            messageId: msgId,
+            status: 'done',
+            content: `Web answer for Q${qIdx}`,
+            model: 'gemini-3.8-flash-001',
+            playbook: qIdx === 1 ? 'oim-coding' : 'oim-full',
+            playbookVersion: qIdx === 1 ? null : 5,
+            tokens: { prompt: 100, completion: 40, total: 140 },
+            retrievedChunkIds: [],
+            toolCalls: [],
+          }),
+          { status: 200, headers: withVersion() },
+        );
+      }
+
+      const stopMatch = /\/chat\/(conv-\d+)\/stop$/.exec(url);
+      if (stopMatch && method === 'POST') {
+        const convId = stopMatch[1]!;
+        const qIdx = convToQIndex.get(convId);
+        const tag = qIdx ? `q${qIdx}` : 'preflight';
+        stoppedConvs.add(convId);
+        events.push(`${tag}:stop:start:${convId}`);
+        if (opts.stopDelayMs && qIdx !== undefined) {
+          await new Promise((r) => setTimeout(r, opts.stopDelayMs));
+        }
+        events.push(`${tag}:stop:done:${convId}`);
+        return new Response(null, { status: 200, headers: withVersion() });
+      }
+
+      const deleteMatch = /\/chat\/(conv-\d+)\/delete$/.exec(url);
+      if (deleteMatch && method === 'POST') {
+        const convId = deleteMatch[1]!;
+        const qIdx = convToQIndex.get(convId);
+        const tag = qIdx ? `q${qIdx}` : 'preflight';
+        events.push(`${tag}:delete:start:${convId}`);
+        if (opts.deleteDelayMs && stoppedConvs.has(convId)) {
+          await new Promise((r) => setTimeout(r, opts.deleteDelayMs));
+        }
+        events.push(`${tag}:delete:done:${convId}`);
+        return new Response(null, {
+          status: 302,
+          headers: withVersion({ Location: '/chat' }),
+        });
+      }
+
+      return new Response(`Unhandled fake URL: ${method} ${url}`, { status: 404 });
+    }) as unknown as typeof fetch;
+
+    return { fetchFn, events, sentPrompts };
+  }
+
+  it('(a) runs full preflight + 2-question sweep (explicit playbook + defaultPlaybook), records correlation IDs & web provenance, and prevents MCP playbookVersion leakage (incl. cross-origin)', async () => {
+    const evalDir = makeWebEvalDir({
+      cat_explicit: { Q1: { playbook: 'oim-coding' } },
+      cat_default: { Q1: { playbook: null } },
+    });
+    const evalDirCrossWithVer = makeWebEvalDir({
+      cat_explicit: { Q1: { playbook: 'oim-coding' } },
+    });
+    const evalDirCrossNoVer = makeWebEvalDir({
+      cat_explicit: { Q1: { playbook: 'oim-coding' } },
+    });
+
+    const prompts: PromptSource = {
+      list: async () => [
+        // MCP reports versions 99 and 88 — neither may leak into web run_meta!
+        { name: 'oim-coding', title: 'Coding', description: '', tools: ['search_corpus'], version: 99 },
+        { name: 'oim-full', title: 'Full', description: '', tools: ['search_corpus'], version: 88 },
+      ],
+      getText: async () => 'PLAYBOOK BODY',
+      serverVersion: () => ({ name: 'yvoke-mcp', version: '1.5.0-mcp' }),
+      close: async () => {},
+    };
+
+    const sameOriginServer = createFakeWebAndPromptFetch({ buildVersionSpan: '2.3.0-web' });
+    const crossOriginWithVerServer = createFakeWebAndPromptFetch({ buildVersionSpan: '2.4.0-staging' });
+    const crossOriginNoVerServer = createFakeWebAndPromptFetch(); // no buildVersionSpan -> gitSha must be 'nogit' on cross-origin!
+
+    const summarySame = await runSuite(
+      cfg({
+        evalDir,
+        provider: 'web',
+        answerModel: 'gemini-3.8-flash',
+        categories: ['cat_explicit', 'cat_default'],
+        limit: 0,
+        merge: false,
+        mcp: { serverBaseUrl: 'http://localhost:8080/mcp', bearer: 'tok', transport: 'http' },
+        web: {
+          baseUrl: 'http://localhost:8080',
+          defaultPlaybook: 'oim-full',
+          pollIntervalMs: 5,
+          keepConversations: false,
+        },
+      }),
+      () => {},
+      {
+        credentials: () => 'ok',
+        fetchFn: sameOriginServer.fetchFn,
+        prompts,
+        answerRunner: undefined,
+        judge: passJudge,
+      },
+    );
+
+    const summaryCrossWithVer = await runSuite(
+      cfg({
+        evalDir: evalDirCrossWithVer,
+        provider: 'web',
+        answerModel: 'gemini-3.8-flash',
+        categories: ['cat_explicit'],
+        limit: 0,
+        merge: true,
+        mcp: { serverBaseUrl: 'http://localhost:8080/mcp', bearer: 'tok', transport: 'http' },
+        web: {
+          baseUrl: 'http://localhost:9090',
+          defaultPlaybook: 'oim-full',
+          pollIntervalMs: 5,
+          keepConversations: false,
+        },
+      }),
+      () => {},
+      {
+        credentials: () => 'ok',
+        fetchFn: crossOriginWithVerServer.fetchFn,
+        prompts,
+        answerRunner: undefined,
+        judge: passJudge,
+      },
+    );
+
+    const summaryCross = await runSuite(
+      cfg({
+        evalDir: evalDirCrossNoVer,
+        provider: 'web',
+        answerModel: 'gemini-3.8-flash',
+        categories: ['cat_explicit'],
+        limit: 0,
+        merge: true,
+        mcp: { serverBaseUrl: 'http://localhost:8080/mcp', bearer: 'tok', transport: 'http' },
+        web: {
+          baseUrl: 'http://localhost:9090',
+          defaultPlaybook: 'oim-full',
+          pollIntervalMs: 5,
+          keepConversations: false,
+        },
+      }),
+      () => {},
+      {
+        credentials: () => 'ok',
+        fetchFn: crossOriginNoVerServer.fetchFn,
+        prompts,
+        answerRunner: undefined,
+        judge: passJudge,
+      },
+    );
+
+    try {
+      expect(summarySame.pass).toBe(2);
+      expect(summarySame.aborted).toBe(false);
+
+      const expDir = summarySame.runDirs.find((d) => d.endsWith('__cat_explicit'))!;
+      const defDir = summarySame.runDirs.find((d) => d.endsWith('__cat_default'))!;
+
+      const expResults = JSON.parse(readFileSync(join(expDir, 'results.json'), 'utf8'));
+      const defResults = JSON.parse(readFileSync(join(defDir, 'results.json'), 'utf8'));
+      expect(expResults[0].webConversationId).toBe('conv-2');
+      expect(expResults[0].webMessageId).toBe('msg-q1');
+      expect(defResults[0].webConversationId).toBe('conv-3');
+      expect(defResults[0].webMessageId).toBe('msg-q2');
+
+      const expMeta = JSON.parse(readFileSync(join(expDir, 'run_meta.json'), 'utf8'));
+      const defMeta = JSON.parse(readFileSync(join(defDir, 'run_meta.json'), 'utf8'));
+      const expSummaryMd = readFileSync(join(expDir, 'summary.md'), 'utf8');
+
+      // Q1 trace had playbookVersion: null -> MCP version 99 MUST NOT leak!
+      expect(expMeta.playbookVersion).toBeNull();
+      // Q2 trace had playbookVersion: 5 -> overrides/ignores MCP version 88!
+      expect(defMeta.playbookVersion).toBe(5);
+
+      // (1) Same-origin with buildVersionSpan: '2.3.0-web':
+      expect(expMeta.webBaseUrl).toBe('http://localhost:8080');
+      expect(expMeta.webServerVersion).toBe('2.3.0-web');
+      expect(expMeta.gitSha).toBe('2.3.0-web');
+      expect(expMeta.mcpServerBaseUrl).toBe('http://localhost:8080/mcp');
+      expect(expMeta.promptMetadataSource).toBe('mcp');
+      expect(expMeta.mcpGitSha).toBeUndefined();
+      expect(expSummaryMd).toContain('- web server version: `2.3.0-web`');
+      expect(expSummaryMd).not.toContain('- mcp git:');
+
+      // (2) Cross-origin WITH buildVersionSpan: '2.4.0-staging':
+      const crossVerMeta = JSON.parse(readFileSync(join(summaryCrossWithVer.runDirs[0]!, 'run_meta.json'), 'utf8'));
+      const crossVerSummaryMd = readFileSync(join(summaryCrossWithVer.runDirs[0]!, 'summary.md'), 'utf8');
+      expect(crossVerMeta.webBaseUrl).toBe('http://localhost:9090');
+      expect(crossVerMeta.webServerVersion).toBe('2.4.0-staging');
+      expect(crossVerMeta.gitSha).toBe('2.4.0-staging');
+      expect(crossVerMeta.promptMetadataSource).toBe('mcp-cross-origin');
+      expect(crossVerMeta.mcpGitSha).toBe('1.5.0-mcp');
+      expect(crossVerSummaryMd).toContain('- web server version: `2.4.0-staging`');
+      expect(crossVerSummaryMd).toContain('- mcp git: `1.5.0-mcp`');
+
+      // (3) Cross-origin WITHOUT buildVersionSpan:
+      const crossMeta = JSON.parse(readFileSync(join(summaryCross.runDirs[0]!, 'run_meta.json'), 'utf8'));
+      const crossSummaryMd = readFileSync(join(summaryCross.runDirs[0]!, 'summary.md'), 'utf8');
+      expect(crossMeta.webBaseUrl).toBe('http://localhost:9090');
+      expect(crossMeta.webServerVersion).toBeNull();
+      expect(crossMeta.promptMetadataSource).toBe('mcp-cross-origin');
+      expect(crossMeta.mcpGitSha).toBe('1.5.0-mcp');
+      expect(crossMeta.gitSha).toBe('nogit');
+      expect(crossSummaryMd).not.toContain('- web server version:');
+      expect(crossSummaryMd).toContain('- mcp git: `1.5.0-mcp`');
+    } finally {
+      summarySame.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      summaryCrossWithVer.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      summaryCross.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+      rmSync(evalDirCrossWithVer, { recursive: true, force: true });
+      rmSync(evalDirCrossNoVer, { recursive: true, force: true });
+    }
+  });
+
+  it('(b) records Q1 as ERROR (with webConversationId) on WebCapacityError 429 exhaustion and continues to Q2, while Judge 429 and upstream provider quota errors still abort sweep', async () => {
+    const evalDirWeb = makeWebEvalDir({
+      basics: {
+        Q1: { playbook: 'demo-basics' },
+        Q2: { playbook: 'demo-basics' },
+      },
+    });
+    const evalDirJudge = makeWebEvalDir({
+      basics: {
+        Q1: { playbook: 'demo-basics' },
+        Q2: { playbook: 'demo-basics' },
+      },
+    });
+    const evalDirUpstreamQuota = makeWebEvalDir({
+      basics: {
+        Q1: { playbook: 'demo-basics' },
+        Q2: { playbook: 'demo-basics' },
+      },
+    });
+    const prompts: PromptSource = {
+      list: async () => [{ name: 'demo-basics', title: 'Basics', description: '', tools: ['search_corpus'], version: 1 }],
+      getText: async () => 'PLAYBOOK',
+      serverVersion: () => ({ name: 'yvoke', version: '1.0.0' }),
+      close: async () => {},
+    };
+
+    let q1SendAttempts = 0;
+    const capacityServer = createFakeWebAndPromptFetch({
+      onSendAsync: (_convId, qIdx) => {
+        if (qIdx === 1) {
+          q1SendAttempts++;
+          return new Response('Busy', { status: 429 });
+        }
+        return new Response(JSON.stringify({ assistantMessageId: `msg-q${qIdx}` }), { status: 202 });
+      },
+    });
+
+    const summaryWeb429 = await runSuite(
+      cfg({
+        evalDir: evalDirWeb,
+        provider: 'web',
+        answerModel: 'gemini-3.8-flash',
+        categories: ['basics'],
+        limit: 0,
+        merge: true,
+        web: {
+          baseUrl: 'http://localhost:8080',
+          defaultPlaybook: null,
+          pollIntervalMs: 5,
+          keepConversations: false,
+          retryDelaysMs: [1, 1],
+        },
+      }),
+      () => {},
+      {
+        credentials: () => 'ok',
+        fetchFn: capacityServer.fetchFn,
+        prompts,
+        answerRunner: undefined,
+        judge: passJudge,
+      },
+    );
+
+    // Contrast 1: Judge 429 on Q1 must still abort the sweep before Q2!
+    const okServer = createFakeWebAndPromptFetch();
+    let judgeCalls = 0;
+    const quotaJudge: Judge = {
+      async review() {
+        judgeCalls++;
+        return {
+          verdict: 'ERROR',
+          dimensions: {},
+          reasoning: '429 Too Many Requests: Claude judge rate limit reached',
+          evidence: [],
+        };
+      },
+    };
+
+    const summaryJudge429 = await runSuite(
+      cfg({
+        evalDir: evalDirJudge,
+        provider: 'web',
+        answerModel: 'gemini-3.8-flash',
+        categories: ['basics'],
+        limit: 0,
+        merge: true,
+        web: {
+          baseUrl: 'http://localhost:8080',
+          defaultPlaybook: null,
+          pollIntervalMs: 5,
+          keepConversations: false,
+          retryDelaysMs: [1, 1],
+        },
+      }),
+      () => {},
+      {
+        credentials: () => 'ok',
+        fetchFn: okServer.fetchFn,
+        prompts,
+        answerRunner: undefined,
+        judge: quotaJudge,
+      },
+    );
+
+    // Contrast 2: Upstream LLM quota error reported in /status must also still abort the sweep!
+    const upstreamQuotaServer = createFakeWebAndPromptFetch({
+      onStatus: () =>
+        new Response(
+          JSON.stringify({ status: 'error', message: { content: 'Upstream LLM quota exceeded (429)' } }),
+          { status: 200 },
+        ),
+    });
+
+    const summaryUpstreamQuota = await runSuite(
+      cfg({
+        evalDir: evalDirUpstreamQuota,
+        provider: 'web',
+        answerModel: 'gemini-3.8-flash',
+        categories: ['basics'],
+        limit: 0,
+        merge: true,
+        web: {
+          baseUrl: 'http://localhost:8080',
+          defaultPlaybook: null,
+          pollIntervalMs: 5,
+          keepConversations: false,
+          retryDelaysMs: [1, 1],
+        },
+      }),
+      () => {},
+      {
+        credentials: () => 'ok',
+        fetchFn: upstreamQuotaServer.fetchFn,
+        prompts,
+        answerRunner: undefined,
+        judge: passJudge,
+      },
+    );
+
+    try {
+      expect(q1SendAttempts).toBe(3);
+      expect(summaryWeb429.aborted).toBe(false);
+      expect(summaryWeb429.total).toBe(2);
+      expect(summaryWeb429.error).toBe(1);
+      expect(summaryWeb429.pass).toBe(1);
+
+      const results = JSON.parse(readFileSync(join(summaryWeb429.runDirs[0]!, 'results.json'), 'utf8'));
+      expect(results[0].verdict.verdict).toBe('ERROR');
+      expect(results[0].error).toContain('HTTP 429 Too Many Requests');
+      expect(results[0].webConversationId).toBe('conv-2');
+      expect(results[0].webMessageId).toBeUndefined();
+      expect(results[1].verdict.verdict).toBe('PASS');
+      expect(results[1].webConversationId).toBe('conv-3');
+      expect(results[1].webMessageId).toBe('msg-q2');
+
+      // Judge 429 aborted immediately after Q1:
+      expect(judgeCalls).toBe(1);
+      expect(summaryJudge429.aborted).toBe(true);
+      expect(summaryJudge429.total).toBe(1);
+
+      // Upstream LLM quota error in /status aborted immediately after Q1:
+      expect(summaryUpstreamQuota.aborted).toBe(true);
+      expect(summaryUpstreamQuota.total).toBe(1);
+    } finally {
+      summaryWeb429.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      summaryJudge429.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      summaryUpstreamQuota.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDirWeb, { recursive: true, force: true });
+      rmSync(evalDirJudge, { recursive: true, force: true });
+      rmSync(evalDirUpstreamQuota, { recursive: true, force: true });
+    }
+  });
+
+  it('(c) awaits Q1 async 2s /stop and 2s /delete strictly BEFORE Q2 POST /chat/new on per-question timeout under fake timers, preserving correlation IDs and exact latencyMs', async () => {
+    const evalDir = makeWebEvalDir({
+      basics: {
+        Q1: { playbook: 'demo-basics' },
+        Q2: { playbook: 'demo-basics' },
+      },
+    });
+    const prompts: PromptSource = {
+      list: async () => [{ name: 'demo-basics', title: 'Basics', description: '', tools: ['search_corpus'], version: 1 }],
+      getText: async () => 'PLAYBOOK',
+      serverVersion: () => ({ name: 'yvoke', version: '1.0.0' }),
+      close: async () => {},
+    };
+
+    const events: string[] = [];
+    const timeoutServer = createFakeWebAndPromptFetch({
+      events,
+      stopDelayMs: 2_000,
+      deleteDelayMs: 2_000,
+      onStatus: (_convId, _msgId, qIdx) => {
+        if (qIdx === 1) {
+          return new Response(JSON.stringify({ status: 'generating' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ status: 'done' }), { status: 200 });
+      },
+    });
+
+    let summary: Awaited<ReturnType<typeof runSuite>> | undefined;
+    vi.useFakeTimers();
+    try {
+      const suitePromise = runSuite(
+        cfg({
+          evalDir,
+          provider: 'web',
+          answerModel: 'gemini-3.8-flash',
+          categories: ['basics'],
+          limit: 0,
+          merge: true,
+          questionTimeoutMs: 1_000,
+          web: {
+            baseUrl: 'http://localhost:8080',
+            defaultPlaybook: null,
+            pollIntervalMs: 5_000,
+            keepConversations: false,
+          },
+        }),
+        () => {},
+        {
+          credentials: () => 'ok',
+          fetchFn: timeoutServer.fetchFn,
+          prompts,
+          answerRunner: undefined,
+          judge: passJudge,
+        },
+      );
+      await vi.runAllTimersAsync();
+      summary = await suitePromise;
+
+      expect(summary.aborted).toBe(false);
+      expect(summary.total).toBe(2);
+      expect(summary.error).toBe(1);
+      expect(summary.pass).toBe(1);
+
+      expect(events).toEqual([
+        'preflight:create:conv-1',
+        'preflight:delete:start:conv-1',
+        'preflight:delete:done:conv-1',
+        'q1:create:conv-2',
+        'q1:stop:start:conv-2',
+        'q1:stop:done:conv-2',
+        'q1:delete:start:conv-2',
+        'q1:delete:done:conv-2',
+        'q2:create:conv-3',
+        'q2:delete:start:conv-3',
+        'q2:delete:done:conv-3',
+      ]);
+
+      const results = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'results.json'), 'utf8'));
+      expect(results[0].verdict.verdict).toBe('ERROR');
+      expect(results[0].webConversationId).toBe('conv-2');
+      expect(results[0].webMessageId).toBe('msg-q1');
+      expect(results[0].latencyMs).toBe(1_000);
+      expect(results[1].verdict.verdict).toBe('PASS');
+      expect(results[1].webConversationId).toBe('conv-3');
+      expect(results[1].webMessageId).toBe('msg-q2');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      summary?.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('(d) aborts before Q2 via production WebAnswerRunner when Q1 trace has 🔧 banner + empty toolCalls (FatalRunError)', async () => {
+    const evalDir = makeWebEvalDir({
+      basics: {
+        Q1: { playbook: 'demo-basics' },
+        Q2: { playbook: 'demo-basics' },
+      },
+    });
+    const prompts: PromptSource = {
+      list: async () => [{ name: 'demo-basics', title: 'Basics', description: '', tools: ['search_corpus'], version: 1 }],
+      getText: async () => 'PLAYBOOK',
+      serverVersion: () => ({ name: 'yvoke', version: '1.0.0' }),
+      close: async () => {},
+    };
+
+    const events: string[] = [];
+    const fatalServer = createFakeWebAndPromptFetch({
+      events,
+      onTrace: (convId, msgId) =>
+        new Response(
+          JSON.stringify({
+            mode: 'single',
+            conversationId: convId,
+            messageId: msgId,
+            status: 'done',
+            content: '🔧 *Calling tool:* `search_corpus`\nUntraced tool answer',
+            toolCalls: [],
+            retrievedChunkIds: [],
+          }),
+          { status: 200 },
+        ),
+    });
+
+    const summary = await runSuite(
+      cfg({
+        evalDir,
+        provider: 'web',
+        answerModel: 'gemini-3.8-flash',
+        categories: ['basics'],
+        limit: 0,
+        merge: true,
+        web: {
+          baseUrl: 'http://localhost:8080',
+          defaultPlaybook: null,
+          pollIntervalMs: 5,
+          keepConversations: false,
+        },
+      }),
+      () => {},
+      {
+        credentials: () => 'ok',
+        fetchFn: fatalServer.fetchFn,
+        prompts,
+        answerRunner: undefined,
+        judge: passJudge,
+      },
+    );
+
+    try {
+      expect(summary.aborted).toBe(true);
+      expect(summary.total).toBe(1);
+      expect(summary.error).toBe(1);
+      expect(summary.abortReason).toContain('APP_CHAT_TRACE_TOOL_CALLS=true');
+      expect(events.some((e) => e.startsWith('q2:create'))).toBe(false);
+
+      const results = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'results.json'), 'utf8'));
+      expect(results[0].webConversationId).toBe('conv-2');
+      expect(results[0].webMessageId).toBe('msg-q1');
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('(e) prevents late buildEvalTask resolution after Q1 timeout from calling POST /chat/new, recording unused prompt metadata, or racing Q2 cleanup before Q3', async () => {
+    const evalDir = makeWebEvalDir({
+      basics: {
+        Q1: { playbook: 'pb-q1-late' },
+        Q2: { playbook: 'demo-basics' },
+        Q3: { playbook: 'demo-basics' },
+      },
+    });
+
+    const events: string[] = [];
+    let q2WasMidFlightWhenQ1PromptResolved = false;
+
+    const prompts: PromptSource = {
+      list: async () => [
+        {
+          name: 'pb-q1-late',
+          title: 'Late Q1',
+          description: '',
+          tools: ['search_corpus'],
+          systemPrompt: 'prompt-q1-unused',
+          version: 77,
+        },
+        {
+          name: 'demo-basics',
+          title: 'Basics',
+          description: '',
+          tools: ['search_corpus'],
+          version: 1,
+        },
+      ],
+      getText: async (name) => {
+        if (name === 'pb-q1-late') {
+          // Resolves at t = 1,500ms: 500ms AFTER Q1's 1,000ms timeout, while Q2 is mid-flight!
+          await new Promise((r) => setTimeout(r, 1_500));
+          q2WasMidFlightWhenQ1PromptResolved =
+            events.includes('q1:create:conv-2') && !events.includes('q1:stop:start:conv-2');
+          return 'LATE Q1 PLAYBOOK';
+        }
+        return 'DEMO BASICS PLAYBOOK';
+      },
+      serverVersion: () => ({ name: 'yvoke', version: '1.0.0' }),
+      close: async () => {},
+    };
+
+    const server = createFakeWebAndPromptFetch({
+      webPlaybooks: ['pb-q1-late', 'demo-basics'],
+      events,
+      stopDelayMs: 2_000,
+      deleteDelayMs: 2_000,
+      onStatus: (convId) => {
+        // conv-2 is Q2 (since Q1 never created a conversation): keep generating until Q2 times out!
+        if (convId === 'conv-2') {
+          return new Response(JSON.stringify({ status: 'generating' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ status: 'done' }), { status: 200 });
+      },
+    });
+
+    let summary: Awaited<ReturnType<typeof runSuite>> | undefined;
+    vi.useFakeTimers();
+    try {
+      const suitePromise = runSuite(
+        cfg({
+          evalDir,
+          provider: 'web',
+          answerModel: 'gemini-3.8-flash',
+          categories: ['basics'],
+          limit: 0,
+          merge: true,
+          questionTimeoutMs: 1_000,
+          web: {
+            baseUrl: 'http://localhost:8080',
+            defaultPlaybook: null,
+            pollIntervalMs: 5_000,
+            keepConversations: false,
+          },
+        }),
+        () => {},
+        {
+          credentials: () => 'ok',
+          fetchFn: server.fetchFn,
+          prompts,
+          answerRunner: undefined,
+          judge: passJudge,
+        },
+      );
+      await vi.runAllTimersAsync();
+      summary = await suitePromise;
+
+      expect(q2WasMidFlightWhenQ1PromptResolved).toBe(true);
+      expect(summary.aborted).toBe(false);
+      expect(summary.total).toBe(3);
+      expect(summary.error).toBe(2);
+      expect(summary.pass).toBe(1);
+
+      // Q1 never called POST /chat/new or /send-async: only Q2 (conv-2) and Q3 (conv-3) sent prompts!
+      expect(server.sentPrompts.map((s) => s.promptName)).toEqual(['demo-basics', 'demo-basics']);
+      expect(server.sentPrompts[0]?.content).toBe('Question Q2');
+      expect(server.sentPrompts[1]?.content).toBe('Question Q3');
+
+      // Q2 (conv-2) /stop + /delete strictly finished before Q3 (conv-3) POST /chat/new:
+      expect(events).toEqual([
+        'preflight:create:conv-1',
+        'preflight:delete:start:conv-1',
+        'preflight:delete:done:conv-1',
+        'q1:create:conv-2',
+        'q1:stop:start:conv-2',
+        'q1:stop:done:conv-2',
+        'q1:delete:start:conv-2',
+        'q1:delete:done:conv-2',
+        'q2:create:conv-3',
+        'q2:delete:start:conv-3',
+        'q2:delete:done:conv-3',
+      ]);
+
+      // Q1's late buildEvalTask did NOT record unused 'pb-q1-late' / 'prompt-q1-unused' prompt metadata:
+      const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
+      expect(meta.playbookPrompts).toBeNull();
+      expect(meta.systemPromptName).toBe('default-chat');
+
+      const results = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'results.json'), 'utf8'));
+      expect(results).toHaveLength(3);
+      expect(results[0].question.id).toBe('Q1');
+      expect(results[0].verdict.verdict).toBe('ERROR');
+      expect(results[0].webConversationId).toBeUndefined();
+      expect(results[1].question.id).toBe('Q2');
+      expect(results[1].verdict.verdict).toBe('ERROR');
+      expect(results[1].webConversationId).toBe('conv-2');
+      expect(results[1].latencyMs).toBe(1_000);
+      expect(results[2].question.id).toBe('Q3');
+      expect(results[2].verdict.verdict).toBe('PASS');
+      expect(results[2].webConversationId).toBe('conv-3');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      summary?.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
+});

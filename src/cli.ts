@@ -16,7 +16,10 @@ import {
 } from './compare/BaselineComparator';
 import { promote } from './compare/promote';
 import type { OrchestratorProfile, OrchestratorTuning } from './agent/orchestration';
+import { validateWebCredentials } from './agent/WebChatClient';
 import { UserError, type ThinkingLevel } from './types';
+
+export { validateWebCredentials };
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -35,6 +38,8 @@ export const CLI_OPTIONS = {
   suite: { type: 'string' },
   category: { type: 'string', multiple: true },
   limit: { type: 'string' },
+  provider: { type: 'string' },
+  'web-url': { type: 'string' },
   'answer-model': { type: 'string' },
   'reviewer-model': { type: 'string' },
   'reviewer-thinking': { type: 'string' },
@@ -102,7 +107,24 @@ export async function cmdRun(
   if (values['dry-run']) {
     const qs = selectQuestions(runConfig);
     console.log('Resolved run configuration:');
-    console.log(JSON.stringify({ ...runConfig, mcp: { ...runConfig.mcp, bearer: mask(runConfig.mcp.bearer) } }, null, 2));
+    const maskedWeb = runConfig.web
+      ? {
+          ...runConfig.web,
+          ...(runConfig.web.password !== undefined ? { password: mask(runConfig.web.password) } : {}),
+          ...(runConfig.web.sessionCookie !== undefined ? { sessionCookie: mask(runConfig.web.sessionCookie) } : {}),
+        }
+      : undefined;
+    console.log(
+      JSON.stringify(
+        {
+          ...runConfig,
+          mcp: { ...runConfig.mcp, bearer: mask(runConfig.mcp.bearer) },
+          ...(maskedWeb ? { web: maskedWeb } : {}),
+        },
+        null,
+        2,
+      ),
+    );
     console.log(`\n${qs.length} question(s) selected:`);
     for (const q of qs) console.log(`  ${q.category}.${q.id}  [${q.expect}]  ${q.question}`);
     return;
@@ -111,10 +133,16 @@ export async function cmdRun(
   const answerLabel =
     runConfig.mode === 'mas'
       ? `${runConfig.evalIntent} eval · sdk-mas (orchestrator=${runConfig.mas?.tuning.orchestrator.model})`
-      : `specialist eval · sdk-single (answer=${runConfig.answerModel})`;
+      : runConfig.provider === 'web'
+        ? `specialist eval · web-single (answer=${runConfig.answerModel})`
+        : `specialist eval · sdk-single (answer=${runConfig.answerModel})`;
+  const targetUrl =
+    runConfig.provider === 'web'
+      ? (runConfig.web?.baseUrl ?? runConfig.mcp.serverBaseUrl)
+      : runConfig.mcp.serverBaseUrl;
   console.error(
     `Running ${runConfig.categories.length > 0 ? runConfig.categories.join(',') : 'all categories'} ` +
-      `via ${answerLabel}, judge=${runConfig.reviewerModel} against ${runConfig.mcp.serverBaseUrl}`,
+      `via ${answerLabel}, judge=${runConfig.reviewerModel} against ${targetUrl}`,
   );
   const summary = await runSuiteFn(runConfig);
 
@@ -128,12 +156,53 @@ export async function cmdRun(
   }
 }
 
+export function resolveBaselineDir(
+  contentRoot: string,
+  cfg: EvalConfig,
+  values: Record<string, unknown>,
+  runDir: string,
+): string {
+  if (values.baseline) {
+    return resolve(contentRoot, String(values.baseline));
+  }
+
+  let runMeta: Record<string, unknown> | undefined;
+  const runMetaPath = path.join(runDir, 'run_meta.json');
+  if (existsSync(runMetaPath)) {
+    try {
+      runMeta = JSON.parse(readFileSync(runMetaPath, 'utf8')) as Record<string, unknown>;
+    } catch {
+      // Malformed run_meta.json will be reported by caller
+    }
+  }
+
+  const isWebRun =
+    String(runMeta?.['answerProvider'] ?? '').startsWith('web-') || values.provider === 'web';
+  const sdkDefaultDir = resolve(contentRoot, './eval/baseline');
+  const webDefaultDir = resolve(contentRoot, './eval/baseline-web');
+  const configuredDir = cfg.baselineDir ? resolve(contentRoot, cfg.baselineDir) : null;
+
+  if (isWebRun) {
+    if (!configuredDir || path.resolve(configuredDir) === path.resolve(sdkDefaultDir)) {
+      return webDefaultDir;
+    }
+    if (path.resolve(configuredDir) !== path.resolve(webDefaultDir)) {
+      console.error(
+        `[WARN] Web run is using custom configured baselineDir (${configuredDir}) instead of ${webDefaultDir}; verify this baseline is not an SDK baseline.`,
+      );
+    }
+    return configuredDir;
+  }
+
+  return configuredDir ?? resolve(contentRoot, baselineDefaultFor(resolveEvalIntent(values, cfg)));
+}
+
 export function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, positionals: string[], contentRoot: string): void {
   const runArg = (values.run as string | undefined) ?? positionals[1];
   if (!runArg) throw new UserError('compare needs a run: `eval compare --run <run-dir-or-id> [--baseline <dir>] [--gate] [--gate-critical]`');
   const evalDir = resolve(contentRoot, cfg.evalDir ?? './eval');
   const runDir = resolveRunDir(runArg, evalDir, contentRoot);
-  const baselineDir = resolve(contentRoot, (values.baseline as string | undefined) ?? cfg.baselineDir ?? baselineDefaultFor(resolveEvalIntent(values, cfg)));
+  const baselineDir = resolveBaselineDir(contentRoot, cfg, values, runDir);
 
   const byCat = groupByCategory(loadResults(runDir));
   const baseByCat = loadBaseline(baselineDir, [...byCat.keys()]);
@@ -191,6 +260,17 @@ export function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, pos
               `[WARN] Answer model mismatch for ${cat}: run used ${runModel ?? 'none'} but baseline used ${baseModel ?? 'none'}.`,
             );
           }
+          const runProvider =
+            (runMeta['answerProvider'] as string | undefined) ??
+            (runMeta['evalIntent'] === 'mas' ? 'sdk-mas' : 'sdk-single');
+          const baseProvider =
+            (baseMeta['answerProvider'] as string | undefined) ??
+            (baseMeta['evalIntent'] === 'mas' ? 'sdk-mas' : 'sdk-single');
+          if (runProvider !== baseProvider) {
+            console.error(
+              `[WARN] Answer provider mismatch for ${cat}: run used ${runProvider} but baseline used ${baseProvider}.`,
+            );
+          }
         } else {
           console.error(
             `[WARN] Scoring version mismatch for ${cat}: run is scored with v${runScoring} but baseline has no run_meta.json.`,
@@ -216,12 +296,12 @@ export function cmdCompare(cfg: EvalConfig, values: Record<string, unknown>, pos
   }
 }
 
-function cmdPromote(cfg: EvalConfig, values: Record<string, unknown>, positionals: string[], contentRoot: string): void {
+export function cmdPromote(cfg: EvalConfig, values: Record<string, unknown>, positionals: string[], contentRoot: string): void {
   const runArg = (values.run as string | undefined) ?? positionals[1];
   if (!runArg) throw new UserError('promote needs a run: `eval promote <run-dir-or-id> [--category C ...] [--baseline <dir>]`');
   const evalDir = resolve(contentRoot, cfg.evalDir ?? './eval');
   const runDir = resolveRunDir(runArg, evalDir, contentRoot);
-  const baselineDir = resolve(contentRoot, (values.baseline as string | undefined) ?? cfg.baselineDir ?? baselineDefaultFor(resolveEvalIntent(values, cfg)));
+  const baselineDir = resolveBaselineDir(contentRoot, cfg, values, runDir);
 
   const res = promote(runDir, baselineDir, values.category as string[] | undefined);
   console.error(`Promoted ${res.categories.length} categor${res.categories.length === 1 ? 'y' : 'ies'} from ${res.runId} → ${baselineDir}:`);
@@ -263,6 +343,19 @@ export function parseThinkingLevel(value: unknown): ThinkingLevel {
   return s as ThinkingLevel;
 }
 
+function parseHttpUrl(raw: string, label: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new UserError(`Invalid ${label} "${raw}": must be a valid http:// or https:// URL.`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new UserError(`Invalid ${label} "${raw}": must be a valid http:// or https:// URL.`);
+  }
+  return parsed;
+}
+
 /**
  * Resolve a config + CLI flags into a RunConfig. `contentRoot` is the directory holding the config
  * file; every relative path in `cfg` resolves against it.
@@ -270,9 +363,86 @@ export function parseThinkingLevel(value: unknown): ThinkingLevel {
 export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, contentRoot: string): RunConfig {
   const evalDir = resolve(contentRoot, cfg.evalDir ?? './eval');
   const limitFlag = values.limit ? Number.parseInt(String(values.limit), 10) : undefined;
+  const rawProvider = String((values.provider as string | undefined) ?? cfg.answer?.provider ?? 'sdk').trim();
+  if (rawProvider !== 'sdk' && rawProvider !== 'web') {
+    throw new UserError(`Invalid --provider "${rawProvider}". Allowed values: sdk, web.`);
+  }
+  const provider: 'sdk' | 'web' = rawProvider;
+
   const evalIntent = resolveEvalIntent(values, cfg);
   // Intent drives execution mode: specialist→single; mas/orchestration→mas.
   const mode: 'single' | 'mas' = evalIntent === 'specialist' ? 'single' : 'mas';
+  if (provider === 'web' && mode !== 'single') {
+    throw new UserError('Web provider currently supports single-agent (specialist) mode only (--mode single --eval specialist).');
+  }
+
+  let answerModel: string;
+  if (provider === 'web') {
+    const explicitWebModel = (
+      (values['answer-model'] as string | undefined) ??
+      cfg.answer?.web?.model
+    )?.trim();
+    const fallbackAnswerModel =
+      cfg.answer?.provider === 'web' ? cfg.answer?.model?.trim() : undefined;
+
+    if (explicitWebModel) {
+      answerModel = explicitWebModel;
+    } else if (fallbackAnswerModel && !/^(sonnet|haiku|opus)$/i.test(fallbackAnswerModel)) {
+      answerModel = fallbackAnswerModel;
+    } else {
+      throw new UserError(
+        'Web provider requires an explicit web chat model via --answer-model <model> or answer.web.model (e.g. gemini-3.8-flash, gpt-5.4-mini, claude-sonnet-5-5).',
+      );
+    }
+  } else {
+    answerModel = normalizeModelName((values['answer-model'] as string | undefined) ?? cfg.answer?.model ?? 'sonnet');
+  }
+
+  const mcpServerBaseUrl = cfg.mcp?.serverBaseUrl ?? 'http://localhost:8080';
+  const parsedMcpUrl = parseHttpUrl(mcpServerBaseUrl, 'mcp.serverBaseUrl');
+  let webConfig: RunConfig['web'];
+  let questionTimeoutMs = 180_000;
+  if (provider === 'web') {
+    const webBaseUrl = (
+      (values['web-url'] as string | undefined) ??
+      cfg.answer?.web?.baseUrl ??
+      parsedMcpUrl.origin
+    ).replace(/\/+$/, '');
+    const parsedWebUrl = parseHttpUrl(webBaseUrl, '--web-url / answer.web.baseUrl');
+    if (parsedWebUrl.origin !== parsedMcpUrl.origin) {
+      console.error(
+        `[WARN] Web baseUrl (${webBaseUrl}) and MCP serverBaseUrl (${mcpServerBaseUrl}) have different origins; system prompt / playbook metadata may not match the web server's database.`,
+      );
+    }
+    const timeoutSec = cfg.answer?.web?.questionTimeoutSec ?? 180;
+    if (typeof timeoutSec !== 'number' || !Number.isFinite(timeoutSec) || timeoutSec <= 0) {
+      throw new UserError(
+        `Invalid answer.web.questionTimeoutSec "${String(timeoutSec)}": must be a finite number > 0.`,
+      );
+    }
+    const pollIntervalMs = cfg.answer?.web?.pollIntervalMs ?? 500;
+    if (typeof pollIntervalMs !== 'number' || !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      throw new UserError(
+        `Invalid answer.web.pollIntervalMs "${String(pollIntervalMs)}": must be a finite number > 0.`,
+      );
+    }
+    validateWebCredentials({
+      sessionCookie: cfg.answer?.web?.sessionCookie,
+      username: cfg.answer?.web?.username,
+      password: cfg.answer?.web?.password,
+    });
+    questionTimeoutMs = timeoutSec * 1000;
+    webConfig = {
+      baseUrl: webBaseUrl,
+      defaultPlaybook: cfg.answer?.web?.defaultPlaybook?.trim() || null,
+      username: cfg.answer?.web?.username,
+      password: cfg.answer?.web?.password,
+      sessionCookie: cfg.answer?.web?.sessionCookie,
+      pollIntervalMs,
+      keepConversations: cfg.answer?.web?.keepConversations ?? false,
+    };
+  }
+
   // Graders are knowledge-base content, so there is no default worth falling back to: a wrong rubric
   // grades the whole run against the wrong domain and reports verdicts that look entirely normal.
   // Demand them here, before any answer is generated, rather than at first use.
@@ -283,6 +453,7 @@ export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, co
       : null;
   return {
     evalDir,
+    provider,
     graderPath,
     orchestrationGraderPath,
     mode,
@@ -291,16 +462,18 @@ export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, co
     // Absent → empty, which makes web access fail closed in canUseTool rather than reaching the
     // open web. An eval is only worth its verdict if the answer ran under the shipped constraints.
     webAllowedDomains: cfg.web?.allowedDomains ?? [],
+    ...(webConfig ? { web: webConfig } : {}),
+    questionTimeoutMs,
     categories: (values.category as string[] | undefined) ?? cfg.run?.categories ?? [],
     expect: (values.expect as string | undefined) ?? null,
     limit: limitFlag ?? cfg.run?.limit ?? 0,
     merge: (values.merge as boolean | undefined) ?? cfg.run?.merge ?? false,
-    answerModel: normalizeModelName((values['answer-model'] as string | undefined) ?? cfg.answer?.model ?? 'sonnet'),
+    answerModel,
     thinkingLevel: parseThinkingLevel(values['thinking'] ?? cfg.answer?.thinkingLevel),
     reviewerModel: normalizeModelName((values['reviewer-model'] as string | undefined) ?? cfg.reviewer?.model ?? 'opus'),
     reviewerThinkingLevel: parseThinkingLevel(values['reviewer-thinking'] ?? cfg.reviewer?.thinkingLevel),
     mcp: {
-      serverBaseUrl: cfg.mcp?.serverBaseUrl ?? 'http://localhost:8080',
+      serverBaseUrl: mcpServerBaseUrl,
       bearer: cfg.mcp?.bearer ?? 'dev-local-token',
       transport: (cfg.mcp?.transport as 'http' | 'sse') ?? 'http',
     },

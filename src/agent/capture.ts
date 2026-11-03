@@ -163,13 +163,7 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
 
   const answer = (textParts.join('\n\n').trim() || resultText || '').trim();
 
-  const chunkIds = new Set<string>();
-  for (const t of tools) {
-    if (!t.resultText) continue;
-    collect(CHUNK_MARKER, t.resultText, chunkIds);
-    if (stripPrefix(t.name) === 'search_corpus') collect(SEARCH_RESULT_ID, t.resultText, chunkIds);
-  }
-  collect(CHUNK_MARKER, answer, chunkIds);
+  const retrievedChunkIds = extractChunkIdsFromToolsAndAnswer(tools, answer);
 
   const promptTokens = totalInputTokens;
   const completionTokens = totalOutputTokens;
@@ -182,12 +176,23 @@ export function bundleFromMessages(messages: StreamMessage[]): AnswerBundle {
       resultText: r,
       isError: e,
     })),
-    retrievedChunkIds: [...chunkIds],
+    retrievedChunkIds,
     promptTokens,
     completionTokens,
     totalTokens: promptTokens + completionTokens,
     providerMeta: { sessionId, costUsd, numTurns, isError, resolvedModel },
   };
+}
+
+export function extractChunkIdsFromToolsAndAnswer(tools: ToolInvocation[], answer: string): string[] {
+  const chunkIds = new Set<string>();
+  for (const t of tools) {
+    if (!t.resultText) continue;
+    collect(CHUNK_MARKER, t.resultText, chunkIds);
+    if (stripPrefix(t.name) === 'search_corpus') collect(SEARCH_RESULT_ID, t.resultText, chunkIds);
+  }
+  collect(CHUNK_MARKER, answer, chunkIds);
+  return [...chunkIds];
 }
 
 /** Flatten an SDK tool_result content (string | text blocks | object) to text — mirrors translate.ts. */

@@ -23,6 +23,21 @@ orchestration eval fails. You want to see both.
 
 ---
 
+## Answer Providers (`--provider sdk | web`)
+
+Execution mode (`single` vs `mas`) and evaluation intent (`specialist` | `mas` | `orchestration`) are orthogonal to how single-agent answers are produced:
+
+| Eval Intent (`--eval`) | Execution (`--mode`) | `--provider sdk` (default) | `--provider web` (`yvoke-web`) | Default Baseline |
+|---|---|---|---|---|
+| **Specialist** (`specialist`) | `single` | ✅ Supported (`sdk-single`) | ✅ Supported (`web-single`) | `./eval/baseline` (`sdk`) / `./eval/baseline-web` (`web`) |
+| **MAS** (`mas`) | `mas` | ✅ Supported (`sdk-mas`) | ❌ Not supported (`sdk`-only) | `./eval/baseline` (or `--baseline ./eval/baseline-sdk-mas`) |
+| **Orchestration** (`orchestration`) | `mas` | 🟡 Supported (`sdk-mas`) | ❌ Not supported (`sdk`-only) | `./eval/baseline-sdk-orchestration` |
+
+- **`--provider web` scope:** Drives `yvoke-web`'s session-authenticated async chat endpoints (`/chat/new`, `/send-async`, `/status`, `/trace`) for Mode 1 (`specialist` / `single`) only. Passing `--mode mas` or `--eval mas|orchestration` with `--provider web` fails fast with a `UserError`.
+- **`defaultPlaybook` behavior on `--provider web`:** Because `yvoke-web` requires a specialist playbook per chat turn, questions authored with `playbook: null` require `answer.web.defaultPlaybook` and are routed through that specialist playbook's system prompt and collection scope rather than free/default chat.
+
+---
+
 ## Mode 1 — Specialist eval  ✅
 
 Evaluate a single specialist agent in isolation. This is what the old Spring Boot eval did.

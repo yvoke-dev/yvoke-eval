@@ -1,4 +1,6 @@
 import { query, type Options, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { EvalQuestion } from '../types';
+import type { PromptSource } from '../mcp/McpPrompts';
 import type { AnswerBundle, EvalTask } from './AnswerBundle';
 import { bundleFromMessages, type StreamMessage } from './capture';
 import { buildMcpServers, type McpTarget } from './mcpServers';
@@ -15,7 +17,12 @@ export interface SdkRunnerOptions extends McpTarget {
 
 /** The single-mode answer producer, as runSuite consumes it. */
 export interface AnswerRunner {
+  preflight?(questions: EvalQuestion[], prompts: PromptSource): Promise<void>;
   run(task: EvalTask): Promise<AnswerBundle>;
+  /** Optional teardown barrier awaited after per-question timeout/abort before starting the next question. */
+  awaitCleanup?(): Promise<void>;
+  /** Optional SUT version reported directly by the answer target (e.g., yvoke-web header/meta). */
+  getServerVersion?(): string | undefined;
 }
 
 /**

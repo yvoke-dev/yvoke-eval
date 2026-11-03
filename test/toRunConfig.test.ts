@@ -2,9 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { toRunConfig, normalizeModelName, parseCliArgs, cmdRun, cmdCompare } from '../src/cli';
+import { toRunConfig, normalizeModelName, parseCliArgs, cmdRun, cmdCompare, cmdPromote, resolveBaselineDir, validateWebCredentials } from '../src/cli';
 import type { EvalConfig } from '../src/config/loadConfig';
 import type { RunSummary } from '../src/run/runSuite';
+import { UserError } from '../src/types';
 
 
 /** A config with everything toRunConfig needs, so each test can remove exactly one thing. */
@@ -814,5 +815,379 @@ describe('cmdCompare', () => {
         rmSync(tmp, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe('toRunConfig — web provider validation & resolution', () => {
+  it('rejects invalid --provider values with UserError', () => {
+    expect(() => toRunConfig(cfg(), { provider: 'invalid-prov' }, CONTENT)).toThrow(
+      /Invalid --provider "invalid-prov"\. Allowed values: sdk, web\./,
+    );
+  });
+
+  it('rejects --mode mas and --eval mas/orchestration when provider === web', () => {
+    expect(() =>
+      toRunConfig(cfg(), { provider: 'web', mode: 'mas', 'answer-model': 'gemini-3.8-flash' }, CONTENT),
+    ).toThrow(/Web provider currently supports single-agent \(specialist\) mode only/);
+    expect(() =>
+      toRunConfig(cfg(), { provider: 'web', eval: 'orchestration', 'answer-model': 'gemini-3.8-flash' }, CONTENT),
+    ).toThrow(/Web provider currently supports single-agent \(specialist\) mode only/);
+  });
+
+  it('accepts explicit Claude web models while rejecting inherited SDK-only models and bare aliases', () => {
+    // Missing web model when cfg.answer.provider !== 'web' (even if cfg.answer.model is concrete):
+    expect(() => toRunConfig(cfg(), { provider: 'web' }, CONTENT)).toThrow(UserError);
+    expect(() =>
+      toRunConfig(cfg({ answer: { model: 'claude-haiku-5-5', thinkingLevel: 'low' } }), { provider: 'web' }, CONTENT),
+    ).toThrow(/Web provider requires an explicit web chat model/);
+
+    // Inherited bare SDK alias when cfg.answer.provider === 'web':
+    expect(() =>
+      toRunConfig(cfg({ answer: { provider: 'web', model: 'sonnet', thinkingLevel: 'low' } }), {}, CONTENT),
+    ).toThrow(/Web provider requires an explicit web chat model/);
+
+    // Explicit --answer-model claude-sonnet-5-5 and answer.web.model: 'claude-haiku-5-5' succeed:
+    expect(
+      toRunConfig(cfg(), { provider: 'web', 'answer-model': 'claude-sonnet-5-5' }, CONTENT).answerModel,
+    ).toBe('claude-sonnet-5-5');
+    expect(
+      toRunConfig(
+        cfg({
+          answer: {
+            provider: 'web',
+            model: 'sonnet',
+            thinkingLevel: 'low',
+            web: { model: 'claude-haiku-5-5' },
+          },
+        }),
+        {},
+        CONTENT,
+      ).answerModel,
+    ).toBe('claude-haiku-5-5');
+  });
+
+  it('validates web credentials: rejects empty, null, or non-string sessionCookie/username/password and partial credentials, while allowing omitted credentials', () => {
+    expect(() => validateWebCredentials({})).not.toThrow();
+    expect(() => validateWebCredentials({ sessionCookie: 'JSESSIONID=abc', username: '' })).not.toThrow();
+
+    expect(() =>
+      toRunConfig(
+        cfg({ answer: { provider: 'web', model: 'gemini-3.8-flash', thinkingLevel: 'low', web: { sessionCookie: '' } } }),
+        {},
+        CONTENT,
+      ),
+    ).toThrow(UserError);
+    expect(() =>
+      toRunConfig(
+        cfg({
+          answer: {
+            provider: 'web',
+            model: 'gemini-3.8-flash',
+            thinkingLevel: 'low',
+            web: { sessionCookie: null as unknown as string },
+          },
+        }),
+        {},
+        CONTENT,
+      ),
+    ).toThrow(UserError);
+    expect(() =>
+      toRunConfig(
+        cfg({
+          answer: {
+            provider: 'web',
+            model: 'gemini-3.8-flash',
+            thinkingLevel: 'low',
+            web: { username: 'admin', password: null as unknown as string },
+          },
+        }),
+        {},
+        CONTENT,
+      ),
+    ).toThrow(UserError);
+    expect(() =>
+      toRunConfig(
+        cfg({
+          answer: {
+            provider: 'web',
+            model: 'gemini-3.8-flash',
+            thinkingLevel: 'low',
+            web: { username: 'admin', password: 123456 as unknown as string },
+          },
+        }),
+        {},
+        CONTENT,
+      ),
+    ).toThrow(/must be a non-empty string/);
+    expect(() => validateWebCredentials({ sessionCookie: '   ' })).toThrow(/answer\.web\.sessionCookie is configured but empty/);
+    expect(() => validateWebCredentials({ sessionCookie: null })).toThrow(/answer\.web\.sessionCookie is configured but empty/);
+    expect(() => validateWebCredentials({ sessionCookie: 42 })).toThrow(/answer\.web\.sessionCookie must be a non-empty string/);
+    expect(() => validateWebCredentials({ username: '', password: 'secret' })).toThrow(/answer\.web\.username is missing or empty/);
+    expect(() => validateWebCredentials({ username: null, password: 'secret' })).toThrow(/answer\.web\.username is missing or empty/);
+    expect(() => validateWebCredentials({ username: 123, password: 'secret' })).toThrow(/answer\.web\.username must be a non-empty string/);
+    expect(() => validateWebCredentials({ username: 'admin', password: '' })).toThrow(/answer\.web\.password is missing or empty/);
+    expect(() => validateWebCredentials({ username: 'admin', password: null })).toThrow(/answer\.web\.password is missing or empty/);
+    expect(() => validateWebCredentials({ username: 'admin', password: 123456 })).toThrow(/answer\.web\.password must be a non-empty string/);
+    expect(() => validateWebCredentials({ username: 'admin' })).toThrow(/answer\.web\.password is missing or empty/);
+    expect(() => validateWebCredentials({ password: 'secret' })).toThrow(/answer\.web\.username is missing or empty/);
+  });
+
+  it('rejects invalid URLs (malformed or non-http/https) with UserError instead of TypeError', () => {
+    for (const badWebUrl of ['not-a-url', 'ftp://example.com']) {
+      let caught: unknown;
+      try {
+        toRunConfig(cfg(), { provider: 'web', 'answer-model': 'gemini-3.8-flash', 'web-url': badWebUrl }, CONTENT);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(UserError);
+      expect((caught as Error).message).toMatch(/must be a valid http:\/\/ or https:\/\/ URL/);
+    }
+
+    for (const badMcpUrl of [':::bad-mcp-url', 'ftp://localhost:8080']) {
+      let caught: unknown;
+      try {
+        toRunConfig(cfg({ mcp: { serverBaseUrl: badMcpUrl, transport: 'http', bearer: 'tok' } }), {}, CONTENT);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(UserError);
+      expect((caught as Error).message).toMatch(/Invalid mcp\.serverBaseUrl/);
+    }
+  });
+
+  it('rejects non-positive or non-finite pollIntervalMs and questionTimeoutSec with UserError', () => {
+    for (const badPoll of [0, -1, Number.NaN]) {
+      expect(() =>
+        toRunConfig(
+          cfg({
+            answer: {
+              provider: 'web',
+              model: 'gemini-3.8-flash',
+              thinkingLevel: 'low',
+              web: { pollIntervalMs: badPoll },
+            },
+          }),
+          {},
+          CONTENT,
+        ),
+      ).toThrow(/Invalid answer\.web\.pollIntervalMs/);
+    }
+
+    for (const badTimeout of [0, -5, Number.NaN]) {
+      expect(() =>
+        toRunConfig(
+          cfg({
+            answer: {
+              provider: 'web',
+              model: 'gemini-3.8-flash',
+              thinkingLevel: 'low',
+              web: { questionTimeoutSec: badTimeout },
+            },
+          }),
+          {},
+          CONTENT,
+        ),
+      ).toThrow(/Invalid answer\.web\.questionTimeoutSec/);
+    }
+  });
+
+  it('resolves web model precedence: --answer-model > answer.web.model > answer.model (when answer.provider === web)', () => {
+    const c1 = cfg({
+      answer: {
+        provider: 'web',
+        model: 'gpt-5.4-mini',
+        thinkingLevel: 'low',
+        web: { model: 'gemini-3.8-flash' },
+      },
+    });
+    expect(toRunConfig(c1, {}, CONTENT).answerModel).toBe('gemini-3.8-flash');
+    expect(toRunConfig(c1, { 'answer-model': 'DeepSeek-V4-Flash' }, CONTENT).answerModel).toBe('DeepSeek-V4-Flash');
+
+    const c2 = cfg({
+      answer: {
+        provider: 'web',
+        model: 'gpt-5.4-mini',
+        thinkingLevel: 'low',
+      },
+    });
+    expect(toRunConfig(c2, {}, CONTENT).answerModel).toBe('gpt-5.4-mini');
+  });
+
+  it('resolves web baseUrl precedence (--web-url > answer.web.baseUrl > mcp origin), warns on origin mismatch, and wires questionTimeoutSec', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const c = cfg({
+        mcp: { serverBaseUrl: 'http://localhost:8080/mcp', transport: 'http', bearer: 'tok' },
+        answer: {
+          provider: 'web',
+          model: 'gemini-3.8-flash',
+          thinkingLevel: 'medium',
+          web: {
+            questionTimeoutSec: 240,
+            defaultPlaybook: 'oim-full',
+          },
+        },
+      });
+      const rcDefault = toRunConfig(c, {}, CONTENT);
+      expect(rcDefault.web?.baseUrl).toBe('http://localhost:8080');
+      expect(rcDefault.web?.defaultPlaybook).toBe('oim-full');
+      expect(rcDefault.questionTimeoutMs).toBe(240_000);
+      expect(errSpy).not.toHaveBeenCalled();
+
+      const rcCliUrl = toRunConfig(c, { 'web-url': 'http://localhost:9090/' }, CONTENT);
+      expect(rcCliUrl.web?.baseUrl).toBe('http://localhost:9090');
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Web baseUrl (http://localhost:9090) and MCP serverBaseUrl (http://localhost:8080/mcp) have different origins'),
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('masks web.password and web.sessionCookie in --dry-run output', async () => {
+    const fixturesEval = new URL('./fixtures/eval', import.meta.url).pathname;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const c = cfg({
+        evalDir: fixturesEval,
+        answer: {
+          provider: 'web',
+          model: 'gemini-3.8-flash',
+          thinkingLevel: 'low',
+          web: {
+            username: 'admin',
+            password: 'supersecretpassword',
+            sessionCookie: 'JSESSIONID=secretcookievalue123',
+          },
+        },
+      });
+      await cmdRun(c, { 'dry-run': true, category: ['basics'], limit: '1' }, CONTENT);
+      const output = logSpy.mock.calls.map((args) => String(args[0])).join('\n');
+      expect(output).not.toContain('supersecretpassword');
+      expect(output).not.toContain('secretcookievalue123');
+      expect(output).toContain('su…rd');
+      expect(output).toContain('JS…23');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
+describe('resolveBaselineDir & provider-aware cmdCompare / cmdPromote', () => {
+  it('routes web runs to eval/baseline-web even when cfg.baselineDir is ./eval/baseline or ./eval/baseline/', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-base-web-'));
+    try {
+      const runDir = join(tmp, 'web-run-1');
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, 'run_meta.json'), JSON.stringify({ answerProvider: 'web-single' }));
+
+      const c1 = cfg({ baselineDir: './eval/baseline' });
+      expect(resolveBaselineDir(tmp, c1, {}, runDir)).toBe(join(tmp, 'eval/baseline-web'));
+
+      const c2 = cfg({ baselineDir: './eval/baseline/' });
+      expect(resolveBaselineDir(tmp, c2, {}, runDir)).toBe(join(tmp, 'eval/baseline-web'));
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('emits a warning when a web run uses a custom cfg.baselineDir, and honors explicit --baseline without warning', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-base-custom-'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const runDir = join(tmp, 'web-run-1');
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, 'run_meta.json'), JSON.stringify({ answerProvider: 'web-single' }));
+
+      const cCustom = cfg({ baselineDir: './eval/custom-baseline' });
+      const resolvedCustom = resolveBaselineDir(tmp, cCustom, {}, runDir);
+      expect(resolvedCustom).toBe(join(tmp, 'eval/custom-baseline'));
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Web run is using custom configured baselineDir'),
+      );
+
+      errSpy.mockClear();
+      const resolvedCli = resolveBaselineDir(tmp, cCustom, { baseline: './eval/cli-baseline' }, runDir);
+      expect(resolvedCli).toBe(join(tmp, 'eval/cli-baseline'));
+      expect(errSpy).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('promotes a web run into eval/baseline-web by default even when cfg.baselineDir is ./eval/baseline', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-promote-web-'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const runDir = join(tmp, 'eval', 'runs', '2026-10-19T12-00-00Z__web-gemini-3.8-flash__sha__basics');
+      mkdirSync(runDir, { recursive: true });
+      const sampleResult = [
+        {
+          question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+          verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+          signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+          answer: 'test',
+        },
+      ];
+      writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(join(runDir, 'run_meta.json'), JSON.stringify({ answerProvider: 'web-single', scoringVersion: '2.2' }));
+      writeFileSync(join(runDir, 'summary.md'), '# Summary');
+      writeFileSync(join(runDir, 'eval_basics.md'), '# Basics');
+
+      cmdPromote(cfg({ baselineDir: './eval/baseline' }), { run: runDir }, ['promote', runDir], tmp);
+
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining(join(tmp, 'eval/baseline-web')));
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('warns on answerProvider mismatch when comparing a web-single run against a legacy baseline without answerProvider', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'yvoke-compare-prov-'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const runDir = join(tmp, 'web-run');
+      const baselineDir = join(tmp, 'legacy-baseline');
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(join(baselineDir, 'basics'), { recursive: true });
+
+      const sampleResult = [
+        {
+          question: { id: 'Q1', category: 'basics', question: 'test', expect: 'answer', critical: false, mustInclude: [], mustNotInclude: [], expectToolCalled: [] },
+          verdict: { verdict: 'PASS', dimensions: {}, reasoning: 'ok' },
+          signals: { mustIncludeMissing: [], mustNotIncludePresent: [] },
+          answer: 'test',
+        },
+      ];
+
+      writeFileSync(join(runDir, 'results.json'), JSON.stringify(sampleResult));
+      writeFileSync(
+        join(runDir, 'run_meta.json'),
+        JSON.stringify({ scoringVersion: '2.2', answerProvider: 'web-single', answerModel: 'gemini-3.8-flash' }),
+      );
+
+      writeFileSync(join(baselineDir, 'basics', 'results.json'), JSON.stringify(sampleResult));
+      // Legacy baseline without answerProvider:
+      writeFileSync(
+        join(baselineDir, 'basics', 'run_meta.json'),
+        JSON.stringify({ scoringVersion: '2.2', answerModel: 'gemini-3.8-flash' }),
+      );
+
+      cmdCompare(cfg(), { run: runDir, baseline: baselineDir }, ['compare', runDir], tmp);
+
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[WARN] Answer provider mismatch for basics: run used web-single but baseline used sdk-single.'),
+      );
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

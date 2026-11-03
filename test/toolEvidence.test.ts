@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toEvidence, unwrapResult } from '../src/reviewer/toolEvidence';
+import { toEvidence, unwrapResult, MAX_RESULT_CHARS, MAX_TOTAL_CHARS } from '../src/reviewer/toolEvidence';
 import { buildUserMessage } from '../src/reviewer/buildUserMessage';
 import { mkQuestion, mcpTool } from './fixtures';
 import type { Signals } from '../src/types';
@@ -51,6 +51,15 @@ describe('toEvidence', () => {
   it('leaves plain markdown (search_corpus) untouched', () => {
     const raw = 'Searched **OIM** for: _x_\n\n### hit';
     expect(unwrapResult(raw)).toBe(raw);
+  });
+
+  it('preserves a 45k-char 10-chunk search_corpus result under default caps (60k per result, 180k total)', () => {
+    expect(MAX_RESULT_CHARS).toBe(60_000);
+    expect(MAX_TOTAL_CHARS).toBe(180_000);
+    const fullSearch = 'c'.repeat(45_000);
+    const ev = toEvidence([call({ name: 'search_corpus', resultText: fullSearch })]);
+    expect(ev[0].resultText).toHaveLength(45_000);
+    expect(ev[0].resultText).not.toContain('[…truncated');
   });
 
   it('caps a single oversized result and marks the truncation', () => {

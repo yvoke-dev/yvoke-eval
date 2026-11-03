@@ -10,7 +10,35 @@ import type { OrchestrationTrace } from './agent/OrchestrationTrace';
  * Anything else keeps its stack — a stack is the point when the fault is ours.
  */
 export class UserError extends Error {
-  override readonly name = 'UserError';
+  override readonly name: string = 'UserError';
+}
+
+/**
+ * A fatal error discovered mid-run (e.g. APP_CHAT_TRACE_TOOL_CALLS=false or expired sessionCookie)
+ * that requires aborting the question loop immediately after recording the failing question.
+ */
+export class FatalRunError extends UserError {
+  override readonly name = 'FatalRunError';
+}
+
+/**
+ * Per-question web server concurrency-limit error (HTTP 429 on POST /chat/{id}/send-async).
+ * Unlike upstream LLM quota exhaustion, this indicates transient server slot contention on a
+ * single question and must record an ERROR row without aborting the entire eval sweep.
+ */
+export class WebCapacityError extends Error {
+  override readonly name = 'WebCapacityError';
+}
+
+export interface ResolvedWebConfig {
+  baseUrl: string;
+  defaultPlaybook: string | null;
+  username?: string;
+  password?: string;
+  sessionCookie?: string;
+  pollIntervalMs: number;
+  keepConversations: boolean;
+  retryDelaysMs?: number[];
 }
 
 export type Expect = 'answer' | 'clarify' | 'redirect' | 'refuse';
@@ -181,6 +209,10 @@ export interface EvalResult {
   retrievedChunkIds?: string[];
   /** Cumulative session cost in USD. */
   costUsd?: number;
+  /** yvoke-web conversation UUID when run under `--provider web` (omitted on SDK runs). */
+  webConversationId?: string;
+  /** yvoke-web assistant message UUID when run under `--provider web` (omitted on SDK runs). */
+  webMessageId?: string;
   // Orchestration eval (Mode 3) — OPTIONAL, present only on the orchestration path. Appended so the
   // specialist / MAS results.json shape is unchanged (absent → omitted by JSON.stringify).
   orchestrationSignals?: OrchestrationSignals;

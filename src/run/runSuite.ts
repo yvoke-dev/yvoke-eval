@@ -4,13 +4,22 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { UserError, type EvalQuestion, type EvalResult, type ThinkingLevel } from '../types';
+import {
+  FatalRunError,
+  UserError,
+  WebCapacityError,
+  type EvalQuestion,
+  type EvalResult,
+  type ResolvedWebConfig,
+  type ThinkingLevel,
+} from '../types';
 
 import type { AnswerBundle } from '../agent/AnswerBundle';
 import { EvalSpecParser } from '../specs/EvalSpecParser';
 import { McpPrompts, type PromptSource, type McpPromptInfo } from '../mcp/McpPrompts';
 import { SystemPromptClient, SYSTEM_PROMPT_NAME } from '../server/SystemPromptClient';
 import { SdkAnswerRunner, type AnswerRunner } from '../agent/SdkAnswerRunner';
+import { WebAnswerRunner } from '../agent/WebAnswerRunner';
 import { MasAnswerRunner } from '../agent/MasAnswerRunner';
 import { buildOrchestrator, type OrchestratorProfile, type OrchestratorTuning } from '../agent/orchestration';
 import { buildEvalTask } from '../agent/buildTask';
@@ -32,8 +41,11 @@ import {
 import { normalizeModelName } from '../cli';
 import { effectiveVerdict } from '../compare/verdict';
 
+export type { ResolvedWebConfig };
+
 export interface RunConfig {
   evalDir: string;
+  provider?: 'sdk' | 'web';
   mode: 'single' | 'mas';
   /** What is being measured (Mode 1/2/3). 'orchestration' grades the process; specialist/mas grade the answer. */
   evalIntent: 'specialist' | 'mas' | 'orchestration';
@@ -48,6 +60,8 @@ export interface RunConfig {
   mcp: { serverBaseUrl: string; bearer: string; transport: 'http' | 'sse' };
   /** The deployment's web allow-list; empty/absent makes web access fail closed. */
   webAllowedDomains: string[];
+  web?: ResolvedWebConfig;
+  questionTimeoutMs?: number;
   reviewerModel: string;
   reviewerThinkingLevel?: ThinkingLevel;
   graderPath: string;
@@ -235,10 +249,14 @@ export async function runSuite(
   const mergedPlaybookPrompts = new Map<string, PromptEntry>(); // keyed by pbKey
   const playbookVersions = new Map<string, number>();
 
+  const effectivePlaybookFor = (q: EvalQuestion): string | null =>
+    q.playbook ?? (cfg.provider === 'web' ? cfg.web?.defaultPlaybook ?? null : null);
+
   // Build the answer producer for the selected mode.
   let produce: (q: EvalQuestion, ac: AbortController) => Promise<AnswerBundle>;
+  let activeRunner: AnswerRunner | undefined;
   let answerModelLabel: string;
-  let answerProvider: 'sdk-single' | 'sdk-mas';
+  let answerProvider: 'sdk-single' | 'sdk-mas' | 'web-single';
   let thinkingLabel: string;
   if (cfg.mode === 'mas') {
     if (!cfg.mas) throw new Error('mas mode requires a resolved profile (cfg.mas).');
@@ -247,34 +265,72 @@ export async function runSuite(
     const masRunner =
       deps.masAnswerRunner ??
       new MasAnswerRunner({ ...cfg.mcp, sandboxDir: cfg.sandboxDir, webAllowedDomains: cfg.webAllowedDomains }, orch);
-    produce = (q, ac) => masRunner.run(q.question, { abortController: ac, expect: q.expect });
+    produce = (q, ac) => {
+      if (ac.signal.aborted) {
+        return Promise.reject(ac.signal.reason ?? new Error('Aborted'));
+      }
+      return masRunner.run(q.question, { abortController: ac, expect: q.expect });
+    };
 
     answerModelLabel = cfg.mas.tuning.orchestrator.model;
     answerProvider = 'sdk-mas';
     thinkingLabel = cfg.mas.tuning.orchestrator.thinkingLevel;
   } else {
-    const runner =
+    const isWeb = cfg.provider === 'web';
+    const runner: AnswerRunner =
       deps.answerRunner ??
-      new SdkAnswerRunner({
-        ...cfg.mcp,
-        sandboxDir: cfg.sandboxDir,
-        maxTurns: cfg.maxTurns,
-        webAllowedDomains: cfg.webAllowedDomains,
-      });
+      (isWeb
+        ? new WebAnswerRunner({
+            baseUrl: cfg.web?.baseUrl ?? new URL(cfg.mcp.serverBaseUrl).origin,
+            answerModel: cfg.answerModel,
+            defaultPlaybook: cfg.web?.defaultPlaybook ?? null,
+            username: cfg.web?.username,
+            password: cfg.web?.password,
+            sessionCookie: cfg.web?.sessionCookie,
+            pollIntervalMs: cfg.web?.pollIntervalMs ?? 500,
+            keepConversations: cfg.web?.keepConversations ?? false,
+            fetchFn: deps.fetchFn,
+            retryDelaysMs: cfg.web?.retryDelaysMs,
+            log,
+          })
+        : new SdkAnswerRunner({
+            ...cfg.mcp,
+            sandboxDir: cfg.sandboxDir,
+            maxTurns: cfg.maxTurns,
+            webAllowedDomains: cfg.webAllowedDomains,
+          }));
+    activeRunner = runner;
+
+    if (runner.preflight) {
+      try {
+        await runner.preflight(questions, prompts);
+      } catch (err) {
+        await prompts.close();
+        throw err;
+      }
+    }
+
     produce = async (q, ac) => {
-      const task = await buildEvalTask(q, prompts, {
+      if (ac.signal.aborted) {
+        throw ac.signal.reason ?? new Error('Aborted');
+      }
+      const effectivePlaybook = effectivePlaybookFor(q);
+      const task = await buildEvalTask({ ...q, playbook: effectivePlaybook }, prompts, {
         answerModel: cfg.answerModel,
         thinkingLevel: cfg.thinkingLevel,
         systemPrompt,
         systemPromptClient,
       });
+      if (ac.signal.aborted) {
+        throw ac.signal.reason ?? new Error('Aborted');
+      }
       task.abortController = ac;
 
-      if (q.playbook && typeof task.playbookVersion === 'number') {
-        playbookVersions.set(q.playbook, task.playbookVersion);
+      if (!isWeb && effectivePlaybook && typeof task.playbookVersion === 'number') {
+        playbookVersions.set(effectivePlaybook, task.playbookVersion);
       }
 
-      const pbKey = q.playbook ?? '_no_playbook';
+      const pbKey = effectivePlaybook ?? '_no_playbook';
       const catKey = `${q.category}::${pbKey}`;
       for (const [map, key] of [[categoryPrompts, catKey], [mergedPlaybookPrompts, pbKey]] as const) {
         let entry = map.get(key);
@@ -287,22 +343,31 @@ export async function runSuite(
         if (task.systemPromptFallback) entry.fallback = true;
       }
 
-      return runner.run(task);
+      const bundle = await runner.run(task);
+      if (effectivePlaybook && typeof bundle.providerMeta?.playbookVersion === 'number') {
+        playbookVersions.set(effectivePlaybook, bundle.providerMeta.playbookVersion);
+      }
+      return bundle;
     };
     answerModelLabel = cfg.answerModel;
-    answerProvider = 'sdk-single';
+    answerProvider = isWeb ? 'web-single' : 'sdk-single';
     thinkingLabel = cfg.thinkingLevel;
   }
 
   const results: EvalResult[] = [];
   let n = 0;
   let resolvedWorkerModel: string | undefined;
+  let fatalAbortReason: string | undefined;
+  let quotaAbortReason: string | undefined;
+  const questionTimeoutMs = cfg.questionTimeoutMs ?? 180_000;
   for (const q of questions) {
     n++;
     const t0 = Date.now();
     let result: EvalResult;
+    let bundle: AnswerBundle | undefined;
+    let skipQuotaAbort = false;
     try {
-      const bundle = await withTimeout((ac) => produce(q, ac), 180_000, `answering ${q.category}.${q.id}`);
+      bundle = await withTimeout((ac) => produce(q, ac), questionTimeoutMs, `answering ${q.category}.${q.id}`);
       if (!resolvedWorkerModel && typeof bundle.providerMeta?.resolvedModel === 'string') {
         resolvedWorkerModel = bundle.providerMeta.resolvedModel;
       }
@@ -311,7 +376,7 @@ export async function runSuite(
             (ac) =>
               gradeOrchestration(
                 q,
-                bundle,
+                bundle!,
                 orchJudge!,
                 Date.now() - t0,
                 {
@@ -324,18 +389,46 @@ export async function runSuite(
             `grading orchestration ${q.category}.${q.id}`,
           )
         : await withTimeout(
-            (ac) => gradeOne(q, bundle, judge, Date.now() - t0, ac),
+            (ac) => gradeOne(q, bundle!, judge, Date.now() - t0, ac),
             180_000,
             `grading ${q.category}.${q.id}`,
           );
     } catch (e) {
+      const elapsedMs = Date.now() - t0;
       const msg = e instanceof Error ? e.message : String(e);
-      result = errorResult(q, msg, Date.now() - t0);
+      if (e instanceof FatalRunError) {
+        fatalAbortReason = msg;
+      }
+      if (e instanceof WebCapacityError) {
+        skipQuotaAbort = true;
+      }
+      await activeRunner?.awaitCleanup?.();
+      const errWebIds = extractErrorWebIds(e);
+      const bundleConvId =
+        typeof bundle?.providerMeta?.conversationId === 'string' && bundle.providerMeta.conversationId.length > 0
+          ? bundle.providerMeta.conversationId
+          : undefined;
+      const bundleMsgId =
+        typeof bundle?.providerMeta?.messageId === 'string' && bundle.providerMeta.messageId.length > 0
+          ? bundle.providerMeta.messageId
+          : undefined;
+      const webConversationId = errWebIds.webConversationId ?? bundleConvId;
+      const webMessageId = errWebIds.webMessageId ?? bundleMsgId;
+      const webIds = {
+        ...(webConversationId ? { webConversationId } : {}),
+        ...(webMessageId ? { webMessageId } : {}),
+      };
+      result = errorResult(q, msg, elapsedMs, webIds);
     }
     results.push(result);
     log(`[${n}/${questions.length}] ${q.category}.${q.id} → ${result.verdict.verdict}`);
+    if (fatalAbortReason) {
+      log(`\n[ABORT] ${fatalAbortReason}`);
+      break;
+    }
     const errText = result.error ?? (result.verdict.verdict === 'ERROR' ? result.verdict.reasoning : null);
-    if (errText && isQuotaOrAuthError(errText)) {
+    if (!skipQuotaAbort && errText && isQuotaOrAuthError(errText)) {
+      quotaAbortReason = 'Quota, authentication, or fatal error encountered';
       log(`\n[ABORT] Fatal quota or authentication failure on ${q.category}.${q.id}: ${errText}`);
       if (isAuthError(errText)) log(LOGIN_INSTRUCTIONS);
       if (isQuotaError(errText)) log(QUOTA_INSTRUCTIONS);
@@ -345,11 +438,28 @@ export async function runSuite(
 
   await prompts.close();
 
-  const sutSha = sanitizeSha(prompts.serverVersion()?.version);
+  const mcpSutSha = sanitizeSha(prompts.serverVersion()?.version);
+  const isWebSingle = answerProvider === 'web-single';
+  const resolvedWebBaseUrl = isWebSingle
+    ? (cfg.web?.baseUrl ?? new URL(cfg.mcp.serverBaseUrl).origin).replace(/\/+$/, '')
+    : undefined;
+  const webOriginMatchesMcp = isWebSingle
+    ? sameHttpOrigin(resolvedWebBaseUrl, cfg.mcp.serverBaseUrl)
+    : true;
+  const rawWebServerVersion = isWebSingle ? activeRunner?.getServerVersion?.() : undefined;
+  const sutSha = isWebSingle
+    ? rawWebServerVersion
+      ? sanitizeSha(rawWebServerVersion)
+      : webOriginMatchesMcp
+        ? mcpSutSha
+        : 'nogit'
+    : mcpSutSha;
   const activeJudge = orchestrationMode ? orchJudge : judge;
   const resolvedJudgeModel = activeJudge?.resolvedModel ?? (judge as { resolvedModel?: string })?.resolvedModel;
 
-  const allPlaybooks = [...new Set(results.map((r) => r.question.playbook).filter((p): p is string => Boolean(p)))];
+  const allPlaybooks = [
+    ...new Set(results.map((r) => effectivePlaybookFor(r.question)).filter((p): p is string => Boolean(p))),
+  ];
 
   function resolvePlaybookVersion(playbooks: string[]): number | null {
     const versions = new Set<number>();
@@ -407,8 +517,18 @@ export async function runSuite(
     scoringVersion: '2.2',
     harnessGitSha: harnessGitSha(),
     contentGitSha: gitShaForDir(cfg.evalDir),
-    sdkModel: answerModelLabel,
-    sdkVersion: agentSdkVersion(),
+    ...(answerProvider === 'web-single'
+      ? {
+          webBaseUrl: resolvedWebBaseUrl ?? null,
+          webServerVersion: rawWebServerVersion ?? null,
+          mcpServerBaseUrl: cfg.mcp.serverBaseUrl,
+          promptMetadataSource: webOriginMatchesMcp ? ('mcp' as const) : ('mcp-cross-origin' as const),
+          ...(!webOriginMatchesMcp && mcpSutSha !== 'nogit' ? { mcpGitSha: mcpSutSha } : {}),
+        }
+      : {
+          sdkModel: answerModelLabel,
+          sdkVersion: agentSdkVersion(),
+        }),
 
     reviewerModel: cfg.reviewerModel,
     resolvedReviewerModel: resolvedJudgeModel ?? null,
@@ -436,8 +556,8 @@ export async function runSuite(
     runDirs.push(writer.write(cfg.evalDir, meta, results).runDir);
   } else {
     for (const [cat, list] of groupByCategory(results)) {
-      const runId = `${newRunId(answerModelLabel, sutSha)}__${cat}`;
-      const distinctKeys = [...new Set(list.map((r) => r.question.playbook ?? '_no_playbook'))];
+      const runId = `${newRunId(answerModelLabel, sutSha, answerProvider)}__${cat}`;
+      const distinctKeys = [...new Set(list.map((r) => effectivePlaybookFor(r.question) ?? '_no_playbook'))];
       let catPlaybooks: string[];
       let catPromptMeta: {
         systemPromptName: string | null;
@@ -498,6 +618,7 @@ export async function runSuite(
     }
   }
 
+  const isAborted = Boolean(fatalAbortReason) || Boolean(quotaAbortReason) || results.length < questions.length;
   const summary: RunSummary = {
     runDirs,
     total: results.length,
@@ -505,8 +626,11 @@ export async function runSuite(
     partial: results.filter((r) => effectiveVerdict(r) === 'PARTIAL').length,
     fail: results.filter((r) => effectiveVerdict(r) === 'FAIL').length,
     error: results.filter((r) => effectiveVerdict(r) === 'ERROR').length,
-    aborted: results.length < questions.length,
-    abortReason: results.length < questions.length ? 'Quota, authentication, or fatal error encountered' : undefined,
+    aborted: isAborted,
+    abortReason:
+      fatalAbortReason ??
+      quotaAbortReason ??
+      (results.length < questions.length ? 'Quota, authentication, or fatal error encountered' : undefined),
   };
   return summary;
 }
@@ -547,7 +671,36 @@ function groupByCategory(results: EvalResult[]): Map<string, EvalResult[]> {
   return m;
 }
 
-function errorResult(q: EvalQuestion, msg: string, latencyMs: number): EvalResult {
+function sameHttpOrigin(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}
+
+function extractErrorWebIds(err: unknown): { webConversationId?: string; webMessageId?: string } {
+  if (!err || typeof err !== 'object') return {};
+  const rec = err as Record<string, unknown>;
+  const webConversationId =
+    typeof rec.webConversationId === 'string' && rec.webConversationId.length > 0
+      ? rec.webConversationId
+      : undefined;
+  const webMessageId =
+    typeof rec.webMessageId === 'string' && rec.webMessageId.length > 0 ? rec.webMessageId : undefined;
+  return {
+    ...(webConversationId ? { webConversationId } : {}),
+    ...(webMessageId ? { webMessageId } : {}),
+  };
+}
+
+function errorResult(
+  q: EvalQuestion,
+  msg: string,
+  latencyMs: number,
+  webIds?: { webConversationId?: string; webMessageId?: string },
+): EvalResult {
   return {
     question: q,
     answer: '',
@@ -567,6 +720,8 @@ function errorResult(q: EvalQuestion, msg: string, latencyMs: number): EvalResul
     totalTokens: 0,
     latencyMs,
     error: msg,
+    ...(webIds?.webConversationId ? { webConversationId: webIds.webConversationId } : {}),
+    ...(webIds?.webMessageId ? { webMessageId: webIds.webMessageId } : {}),
   };
 }
 

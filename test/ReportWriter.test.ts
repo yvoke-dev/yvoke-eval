@@ -234,3 +234,70 @@ describe('renderCategoryReport — unverifiedCitations', () => {
   });
 });
 
+describe('ReportWriter — web-single run IDs and mode display', () => {
+  it('prefixes model slug with web- in newRunId and ReportWriter.write when answerProvider starts with web-', () => {
+    expect(newRunId('gemini-3.8-flash', 'abc1234', 'web-single')).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z__web-gemini-3\.8-flash__abc1234$/,
+    );
+    expect(newRunId('claude-sonnet-5-5', 'abc1234', 'sdk-single')).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z__claude-sonnet-5-5__abc1234$/,
+    );
+
+    const results = JSON.parse(readFileSync(baselineResults, 'utf8')) as EvalResult[];
+    const meta = {
+      answerModel: 'gemini-3.8-flash',
+      answerProvider: 'web-single',
+      evalIntent: 'specialist',
+      reviewerModel: 'claude-opus-5-5',
+      thinkingLevel: 'medium',
+      playbookVersion: 4,
+      gitSha: 'websha',
+      webBaseUrl: 'http://localhost:8080',
+      webServerVersion: null,
+      mcpServerBaseUrl: 'http://localhost:8080/mcp',
+      promptMetadataSource: 'mcp',
+    };
+    const overviewPath = join(evalDir, 'runs', 'OVERVIEW.md');
+    const { runDir, runId } = new ReportWriter().write(evalDir, meta, results);
+    let crossRunDir: string | undefined;
+    try {
+      expect(runId).toContain('__web-gemini-3.8-flash__websha');
+      const summary = readFileSync(join(runDir, 'summary.md'), 'utf8');
+      expect(summary).toContain('- mode: `specialist (web)`');
+      expect(summary).toContain('- web target: `http://localhost:8080`\n');
+      expect(summary).not.toContain('- web server version:');
+      expect(summary).not.toContain('- mcp git:');
+      expect(summary).not.toContain('cross-origin');
+      expect(summary).toContain('| basics | Q1 |');
+      expect(summary).toContain('| specialist (web) | gemini-3.8-flash |');
+
+      const overview = readFileSync(overviewPath, 'utf8');
+      expect(overview).toContain(`| \`${runId}\` | specialist (web) | v4 |`);
+
+      const crossWrite = new ReportWriter().write(
+        evalDir,
+        {
+          ...meta,
+          webBaseUrl: 'http://localhost:9090',
+          webServerVersion: '2.4.0-staging',
+          mcpServerBaseUrl: 'http://localhost:8080/mcp',
+          promptMetadataSource: 'mcp-cross-origin',
+          mcpGitSha: '1.5.0-mcp',
+        },
+        results,
+        `${runId}__cross`,
+      );
+      crossRunDir = crossWrite.runDir;
+      const crossSummary = readFileSync(join(crossRunDir, 'summary.md'), 'utf8');
+      expect(crossSummary).toContain(
+        '- web target: `http://localhost:9090` (prompt metadata from MCP `http://localhost:8080/mcp` — cross-origin)\n' +
+          '- web server version: `2.4.0-staging`\n' +
+          '- mcp git: `1.5.0-mcp`\n',
+      );
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+      if (crossRunDir) rmSync(crossRunDir, { recursive: true, force: true });
+      rmSync(overviewPath, { force: true });
+    }
+  });
+});

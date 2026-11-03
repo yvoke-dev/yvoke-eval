@@ -20,6 +20,19 @@ export async function gradeOne(
   latencyMs: number,
   abortController?: AbortController,
 ): Promise<EvalResult> {
+  const webConversationId =
+    typeof bundle.providerMeta?.conversationId === 'string' && bundle.providerMeta.conversationId.length > 0
+      ? bundle.providerMeta.conversationId
+      : undefined;
+  const webMessageId =
+    typeof bundle.providerMeta?.messageId === 'string' && bundle.providerMeta.messageId.length > 0
+      ? bundle.providerMeta.messageId
+      : undefined;
+  const webIds = {
+    ...(webConversationId ? { webConversationId } : {}),
+    ...(webMessageId ? { webMessageId } : {}),
+  };
+
   try {
     const signals = extractSignals(question, bundle);
     const evidence = toEvidence(bundle.toolCalls);
@@ -53,6 +66,7 @@ export async function gradeOne(
       toolEvidence: evidence,
       retrievedChunkIds: bundle.retrievedChunkIds,
       costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
+      ...webIds,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -79,6 +93,7 @@ export async function gradeOne(
       toolEvidence: toEvidence(bundle.toolCalls),
       retrievedChunkIds: bundle.retrievedChunkIds,
       costUsd: typeof bundle.providerMeta?.costUsd === 'number' ? bundle.providerMeta.costUsd : undefined,
+      ...webIds,
     };
   }
 }
