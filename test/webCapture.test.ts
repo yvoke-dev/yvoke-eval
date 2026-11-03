@@ -93,10 +93,36 @@ describe('bundleFromWebTrace — FatalRunError detection when APP_CHAT_TRACE_TOO
     expect(() => bundleFromWebTrace(trace)).toThrow(FatalRunError);
   });
 
-  it('throws FatalRunError when toolCalls is empty and content has <clarifying-question>', () => {
+  it('does NOT throw FatalRunError when toolCalls is empty and content has <clarifying-question> alone, synthesizing via XML fallback and flagging providerMeta', () => {
     const trace: WebMessageTraceDto = {
       status: 'done',
-      content: '<clarifying-question>\n  <question>Which module?</question>\n</clarifying-question>',
+      content:
+        '<clarifying-question>\n  <question>Which module?</question>\n  <option>Sync</option>\n  <option>Attestation</option>\n</clarifying-question>',
+      toolCalls: [],
+      retrievedChunkIds: [],
+    };
+    const bundle = bundleFromWebTrace(trace);
+    expect(bundle.answer).toBe('<clarifying-question>Which module?\noptions: Sync | Attestation</clarifying-question>');
+    expect(bundle.providerMeta?.clarifyingXmlWithoutToolCall).toBe(true);
+  });
+
+  it('does NOT set clarifyingXmlWithoutToolCall when <clarifying-question> only appears inside a <think> block', () => {
+    const trace: WebMessageTraceDto = {
+      status: 'done',
+      content: '<think>Should I use <clarifying-question>?</think>Direct answer',
+      toolCalls: [],
+      retrievedChunkIds: [],
+    };
+    const bundle = bundleFromWebTrace(trace);
+    expect(bundle.answer).toBe('Direct answer');
+    expect(bundle.providerMeta?.clarifyingXmlWithoutToolCall).toBeUndefined();
+  });
+
+  it('still throws FatalRunError when toolCalls is empty and content has BOTH 🔧 banner and <clarifying-question>', () => {
+    const trace: WebMessageTraceDto = {
+      status: 'done',
+      content:
+        '🔧 *Calling tool:* `search_corpus`\n<clarifying-question>\n  <question>Which module?</question>\n</clarifying-question>',
       toolCalls: [],
       retrievedChunkIds: [],
     };

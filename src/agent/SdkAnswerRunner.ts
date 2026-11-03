@@ -19,6 +19,10 @@ export interface SdkRunnerOptions extends McpTarget {
 export interface AnswerRunner {
   preflight?(questions: EvalQuestion[], prompts: PromptSource): Promise<void>;
   run(task: EvalTask): Promise<AnswerBundle>;
+  /** Optional teardown barrier awaited after per-question timeout/abort before starting the next question. */
+  awaitCleanup?(): Promise<void>;
+  /** Optional SUT version reported directly by the answer target (e.g., yvoke-web header/meta). */
+  getServerVersion?(): string | undefined;
 }
 
 /**

@@ -116,6 +116,8 @@ export interface OldResultLike {
   completionTokens?: number;
   totalTokens?: number;
   costUsd?: number;
+  webConversationId?: string;
+  webMessageId?: string;
 }
 
 export function buildReplayBundle(o: OldResultLike): { bundle: AnswerBundle; evidenceTruncated: boolean } {
@@ -148,7 +150,15 @@ export function buildReplayBundle(o: OldResultLike): { bundle: AnswerBundle; evi
     promptTokens: o.promptTokens ?? 0,
     completionTokens: o.completionTokens ?? 0,
     totalTokens: o.totalTokens ?? 0,
-    providerMeta: o.costUsd != null ? { costUsd: o.costUsd } : {},
+    providerMeta: {
+      ...(o.costUsd != null ? { costUsd: o.costUsd } : {}),
+      ...(typeof o.webConversationId === 'string' && o.webConversationId.length > 0
+        ? { conversationId: o.webConversationId }
+        : {}),
+      ...(typeof o.webMessageId === 'string' && o.webMessageId.length > 0
+        ? { messageId: o.webMessageId }
+        : {}),
+    },
   };
   return { bundle, evidenceTruncated };
 }
@@ -292,7 +302,14 @@ async function main(): Promise<void> {
         latencyMs: 0,
         error: isJudgeError ? (verdict.reasoning || 'reviewer call failed') : null,
         toolEvidence: evidence,
+        ...(o.retrievedChunkIds !== undefined ? { retrievedChunkIds: o.retrievedChunkIds } : {}),
         costUsd: o.costUsd,
+        ...(typeof o.webConversationId === 'string' && o.webConversationId.length > 0
+          ? { webConversationId: o.webConversationId }
+          : {}),
+        ...(typeof o.webMessageId === 'string' && o.webMessageId.length > 0
+          ? { webMessageId: o.webMessageId }
+          : {}),
       };
     } else {
       const messages = sessions.get(q.question.trim());

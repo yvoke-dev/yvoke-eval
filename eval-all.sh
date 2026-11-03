@@ -4,6 +4,7 @@
 #
 #   ./eval-all.sh --dry-run                                  # plan only, no model calls
 #   ./eval-all.sh --promote ./eval/baseline-sdk-single       # full sweep, promote as it goes
+#   ./eval-all.sh --provider web --answer-model <model> [--web-url <url>] --promote ./eval/baseline-web
 #   ./eval-all.sh --from ts_databases                        # resume where a sweep stopped
 #   ./eval-all.sh --only db_history,customers --continue
 #

@@ -2,9 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { toRunConfig, normalizeModelName, parseCliArgs, cmdRun, cmdCompare, cmdPromote, resolveBaselineDir } from '../src/cli';
+import { toRunConfig, normalizeModelName, parseCliArgs, cmdRun, cmdCompare, cmdPromote, resolveBaselineDir, validateWebCredentials } from '../src/cli';
 import type { EvalConfig } from '../src/config/loadConfig';
 import type { RunSummary } from '../src/run/runSuite';
+import { UserError } from '../src/types';
 
 
 /** A config with everything toRunConfig needs, so each test can remove exactly one thing. */
@@ -833,16 +834,162 @@ describe('toRunConfig — web provider validation & resolution', () => {
     ).toThrow(/Web provider currently supports single-agent \(specialist\) mode only/);
   });
 
-  it('requires an explicit non-Claude web model when provider === web', () => {
-    expect(() => toRunConfig(cfg(), { provider: 'web' }, CONTENT)).toThrow(
-      /Web provider requires an explicit web chat model/,
-    );
-    expect(() => toRunConfig(cfg(), { provider: 'web', 'answer-model': 'sonnet' }, CONTENT)).toThrow(
-      /Web provider requires an explicit web chat model/,
-    );
-    expect(() => toRunConfig(cfg(), { provider: 'web', 'answer-model': 'claude-sonnet-5-5' }, CONTENT)).toThrow(
-      /Web provider requires an explicit web chat model/,
-    );
+  it('accepts explicit Claude web models while rejecting inherited SDK-only models and bare aliases', () => {
+    // Missing web model when cfg.answer.provider !== 'web' (even if cfg.answer.model is concrete):
+    expect(() => toRunConfig(cfg(), { provider: 'web' }, CONTENT)).toThrow(UserError);
+    expect(() =>
+      toRunConfig(cfg({ answer: { model: 'claude-haiku-5-5', thinkingLevel: 'low' } }), { provider: 'web' }, CONTENT),
+    ).toThrow(/Web provider requires an explicit web chat model/);
+
+    // Inherited bare SDK alias when cfg.answer.provider === 'web':
+    expect(() =>
+      toRunConfig(cfg({ answer: { provider: 'web', model: 'sonnet', thinkingLevel: 'low' } }), {}, CONTENT),
+    ).toThrow(/Web provider requires an explicit web chat model/);
+
+    // Explicit --answer-model claude-sonnet-5-5 and answer.web.model: 'claude-haiku-5-5' succeed:
+    expect(
+      toRunConfig(cfg(), { provider: 'web', 'answer-model': 'claude-sonnet-5-5' }, CONTENT).answerModel,
+    ).toBe('claude-sonnet-5-5');
+    expect(
+      toRunConfig(
+        cfg({
+          answer: {
+            provider: 'web',
+            model: 'sonnet',
+            thinkingLevel: 'low',
+            web: { model: 'claude-haiku-5-5' },
+          },
+        }),
+        {},
+        CONTENT,
+      ).answerModel,
+    ).toBe('claude-haiku-5-5');
+  });
+
+  it('validates web credentials: rejects empty, null, or non-string sessionCookie/username/password and partial credentials, while allowing omitted credentials', () => {
+    expect(() => validateWebCredentials({})).not.toThrow();
+    expect(() => validateWebCredentials({ sessionCookie: 'JSESSIONID=abc', username: '' })).not.toThrow();
+
+    expect(() =>
+      toRunConfig(
+        cfg({ answer: { provider: 'web', model: 'gemini-3.8-flash', thinkingLevel: 'low', web: { sessionCookie: '' } } }),
+        {},
+        CONTENT,
+      ),
+    ).toThrow(UserError);
+    expect(() =>
+      toRunConfig(
+        cfg({
+          answer: {
+            provider: 'web',
+            model: 'gemini-3.8-flash',
+            thinkingLevel: 'low',
+            web: { sessionCookie: null as unknown as string },
+          },
+        }),
+        {},
+        CONTENT,
+      ),
+    ).toThrow(UserError);
+    expect(() =>
+      toRunConfig(
+        cfg({
+          answer: {
+            provider: 'web',
+            model: 'gemini-3.8-flash',
+            thinkingLevel: 'low',
+            web: { username: 'admin', password: null as unknown as string },
+          },
+        }),
+        {},
+        CONTENT,
+      ),
+    ).toThrow(UserError);
+    expect(() =>
+      toRunConfig(
+        cfg({
+          answer: {
+            provider: 'web',
+            model: 'gemini-3.8-flash',
+            thinkingLevel: 'low',
+            web: { username: 'admin', password: 123456 as unknown as string },
+          },
+        }),
+        {},
+        CONTENT,
+      ),
+    ).toThrow(/must be a non-empty string/);
+    expect(() => validateWebCredentials({ sessionCookie: '   ' })).toThrow(/answer\.web\.sessionCookie is configured but empty/);
+    expect(() => validateWebCredentials({ sessionCookie: null })).toThrow(/answer\.web\.sessionCookie is configured but empty/);
+    expect(() => validateWebCredentials({ sessionCookie: 42 })).toThrow(/answer\.web\.sessionCookie must be a non-empty string/);
+    expect(() => validateWebCredentials({ username: '', password: 'secret' })).toThrow(/answer\.web\.username is missing or empty/);
+    expect(() => validateWebCredentials({ username: null, password: 'secret' })).toThrow(/answer\.web\.username is missing or empty/);
+    expect(() => validateWebCredentials({ username: 123, password: 'secret' })).toThrow(/answer\.web\.username must be a non-empty string/);
+    expect(() => validateWebCredentials({ username: 'admin', password: '' })).toThrow(/answer\.web\.password is missing or empty/);
+    expect(() => validateWebCredentials({ username: 'admin', password: null })).toThrow(/answer\.web\.password is missing or empty/);
+    expect(() => validateWebCredentials({ username: 'admin', password: 123456 })).toThrow(/answer\.web\.password must be a non-empty string/);
+    expect(() => validateWebCredentials({ username: 'admin' })).toThrow(/answer\.web\.password is missing or empty/);
+    expect(() => validateWebCredentials({ password: 'secret' })).toThrow(/answer\.web\.username is missing or empty/);
+  });
+
+  it('rejects invalid URLs (malformed or non-http/https) with UserError instead of TypeError', () => {
+    for (const badWebUrl of ['not-a-url', 'ftp://example.com']) {
+      let caught: unknown;
+      try {
+        toRunConfig(cfg(), { provider: 'web', 'answer-model': 'gemini-3.8-flash', 'web-url': badWebUrl }, CONTENT);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(UserError);
+      expect((caught as Error).message).toMatch(/must be a valid http:\/\/ or https:\/\/ URL/);
+    }
+
+    for (const badMcpUrl of [':::bad-mcp-url', 'ftp://localhost:8080']) {
+      let caught: unknown;
+      try {
+        toRunConfig(cfg({ mcp: { serverBaseUrl: badMcpUrl, transport: 'http', bearer: 'tok' } }), {}, CONTENT);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(UserError);
+      expect((caught as Error).message).toMatch(/Invalid mcp\.serverBaseUrl/);
+    }
+  });
+
+  it('rejects non-positive or non-finite pollIntervalMs and questionTimeoutSec with UserError', () => {
+    for (const badPoll of [0, -1, Number.NaN]) {
+      expect(() =>
+        toRunConfig(
+          cfg({
+            answer: {
+              provider: 'web',
+              model: 'gemini-3.8-flash',
+              thinkingLevel: 'low',
+              web: { pollIntervalMs: badPoll },
+            },
+          }),
+          {},
+          CONTENT,
+        ),
+      ).toThrow(/Invalid answer\.web\.pollIntervalMs/);
+    }
+
+    for (const badTimeout of [0, -5, Number.NaN]) {
+      expect(() =>
+        toRunConfig(
+          cfg({
+            answer: {
+              provider: 'web',
+              model: 'gemini-3.8-flash',
+              thinkingLevel: 'low',
+              web: { questionTimeoutSec: badTimeout },
+            },
+          }),
+          {},
+          CONTENT,
+        ),
+      ).toThrow(/Invalid answer\.web\.questionTimeoutSec/);
+    }
   });
 
   it('resolves web model precedence: --answer-model > answer.web.model > answer.model (when answer.provider === web)', () => {
@@ -1044,4 +1191,3 @@ describe('resolveBaselineDir & provider-aware cmdCompare / cmdPromote', () => {
     }
   });
 });
-

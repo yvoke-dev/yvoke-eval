@@ -1,9 +1,10 @@
 # yvoke-eval
 
-Standalone eval harness for the Yvoke RAG assistant. It runs authored question suites through the
-**Claude Agent SDK** (single-agent or multi-agent) against the yvoke **MCP** server — exactly like
-`yvoke-desktop` — grades each answer with a version-controlled LLM-as-judge, and writes timestamped,
-comparable result sets.
+Standalone eval harness for the Yvoke RAG assistant. It runs authored question suites against an
+answer provider — either `--provider sdk` (default: **Claude Agent SDK** single-agent or multi-agent
+over **MCP**, matching `yvoke-desktop`) or `--provider web` (`yvoke-web`'s HTTP async chat + trace
+endpoints, single-agent specialist mode) — grades each answer with a version-controlled LLM-as-judge,
+and writes timestamped, comparable result sets.
 
 **This repository contains no eval content.** Suites, grader rubrics, baselines and recorded runs
 belong to a knowledge base and live in their own repository; the harness is pointed at one with
@@ -14,14 +15,17 @@ Extracted from the in-repo Spring Boot eval IT (`yvoke-web/src/it/java/.../eval`
 
 ## Design in one screen
 
-- **Answers come only from the Claude Agent SDK → MCP** (`localhost:8080/mcp`). Playbook **prompts,
-  tools, and `codeExecution` are loaded from MCP** (`prompts/list` + `prompts/get`). Two modes:
-  `single` (any playbook, incl. one specialist) and `mas` (orchestrator + specialists + reviewer).
-  The one exception to MCP-only is the **base system prompt**, which is not an MCP prompt: it is read
-  from `GET /api/chat/v1/prompts/system/default-chat`, exactly as yvoke-desktop does, so answers are
-  produced under the deployed grounding and citation rules. No other server endpoints, no
-  server-side writes.
-- **Signals are derived from the SDK trace + MCP tool results** — no DB. Tools fired, searched/retrieved
+- **Two answer providers:**
+  - **`--provider sdk` (default):** Answers come from the Claude Agent SDK → MCP (`localhost:8080/mcp`).
+    Playbook **prompts, tools, and `codeExecution` are loaded from MCP** (`prompts/list` + `prompts/get`).
+    Supports both `single` (any playbook, incl. one specialist) and `mas` (orchestrator + specialists +
+    reviewer). The base system prompt is read from `GET /api/chat/v1/prompts/system/default-chat` (or the
+    playbook's designated system prompt), matching `yvoke-desktop`.
+  - **`--provider web`:** Answers come from `yvoke-web`'s session-authenticated async chat endpoints
+    (`/chat/new`, `/send-async`, `/status`, `/trace`) in `single` (specialist) mode, evaluating non-SDK
+    or server-hosted chat models (e.g. Gemini, OpenAI, or Claude models configured in `yvoke-web`).
+    Conversations created per question are automatically deleted unless `keepConversations: true`.
+- **Signals are derived from the execution trace + tool results** — no DB. Tools fired, searched/retrieved
   collections, chunk counts, include/exclude checks, citation discipline.
 - **The grader is owned by the eval content, not the server.** The rubric is named by
   `reviewer.promptFile` in the content repository's config — there is no default, since a rubric is
@@ -52,7 +56,7 @@ The harness answers three different questions, scored differently, at three leve
 
 Both answer modes run end-to-end against a live `localhost:8080` and grade to a full structured
 verdict — **verified** (both smoke-graded PASS), all on `~/.claude` subscription auth (no API key).
-`compare`/`--gate`/`promote` are implemented and tested. 325+ offline tests + typecheck green.
+`compare`/`--gate`/`promote` are implemented and tested. 465+ offline tests + typecheck green.
 
 
 - **`single` mode** — one playbook, tools + prompt from MCP, captured to an `AnswerBundle`.
@@ -134,6 +138,61 @@ web:
 ```
 
 If `web.allowedDomains` is omitted or empty, web tool calls fail closed in `canUseTool`, ensuring eval runs only contact approved endpoints matching production policy.
+
+> **Do not confuse `web.allowedDomains` with `answer.web.*`:** Top-level `web.allowedDomains` configures the outbound domain allow-list injected into the Claude Agent SDK's `WebSearch` / `WebFetch` tools (`--provider sdk`). By contrast, `answer.web.*` configures the `yvoke-web` HTTP chat answer provider (`--provider web`).
+
+### Evaluating `yvoke-web` (`--provider web`)
+
+`--provider web` drives `yvoke-web`'s HTTP chat endpoints directly in single-agent (`specialist`) mode and grades the normalized `MessageTraceDto` with the exact same signal extractor and Claude Judge used for SDK runs.
+
+#### Required `yvoke-web` Server Settings & Auth
+
+1. **Tool-call tracing (`APP_CHAT_TRACE_TOOL_CALLS=true`):** `yvoke-web` must run with `app.chat.trace-tool-calls=true` (`APP_CHAT_TRACE_TOOL_CALLS=true`) so `/chat/{id}/messages/{messageId}/trace` includes `toolCalls`. If `yvoke-web` emits tool banners or `retrievedChunkIds` with an empty `toolCalls` array, the harness aborts immediately with a `FatalRunError` rather than grading incomplete traces.
+2. **Authentication (Mock Login vs. Session Cookie):**
+   - **Local / Dev Mock Auth:** Start `yvoke-web` with `SPRING_PROFILES_ACTIVE=dev` and `APP_SECURITY_MOCK=true`. Omit `username`/`password` to use the default `admin`/`admin` mock login, or set both `answer.web.username` and `answer.web.password` explicitly.
+   - **Pre-authenticated Session Cookie:** Set `answer.web.sessionCookie` (e.g. `${YVOKE_SESSION}`) for environments without mock form login. Empty interpolated credential strings fail fast at startup with a `UserError`.
+3. **Trace Role Requirement:** The authenticated web user must hold `ROLE_ADMIN` or `ROLE_AREA_ADMIN` (verified during startup preflight against `/chat/{id}/messages/.../trace`).
+4. **Allowed Models (`app.chat.allowed-models`):** Web model resolution follows `--answer-model <model>` > `answer.web.model` > `answer.model` (the `answer.model` fallback applies only when `answer.provider: web` is set in config and its value is not a bare SDK alias `sonnet`/`haiku`/`opus`; when overriding an SDK config from the CLI with `--provider web`, pass `--answer-model` or configure `answer.web.model`). Startup preflight verifies that `yvoke-web` accepts the resolved model on `POST /chat/{id}/model`.
+
+#### Configuration (`answer.web.*`) & Playbook Scope
+
+```yaml
+answer:
+  provider: web                # or pass --provider web on the CLI
+  thinkingLevel: medium        # off -> mapped to 'minimal' for yvoke-web
+  web:
+    baseUrl: "${YVOKE_WEB_URL:http://localhost:8080}" # defaults to origin of mcp.serverBaseUrl
+    model: gemini-3.8-flash    # or pass --answer-model <model>
+    defaultPlaybook: oim-full  # fallback specialist playbook when a question has playbook: null
+    # username: "${YVOKE_WEB_USER}"
+    # password: "${YVOKE_WEB_PASSWORD}"
+    # sessionCookie: "${YVOKE_SESSION}"
+    pollIntervalMs: 500        # default 500 (must be > 0)
+    questionTimeoutSec: 180    # default 180 (must be > 0)
+    keepConversations: false   # default false (deletes per-question conversations after capture)
+```
+
+> **Playbook requirement & `defaultPlaybook` measurement note:** `yvoke-web` chat requires selecting a playbook prompt on `POST /chat/{id}/send-async`. Setting `answer.web.defaultPlaybook` routes un-annotated questions (`playbook: null`) through that specialist playbook's system prompt and collection scope rather than free/default chat (`results.json` still preserves the authored `question.playbook: null`).
+
+#### Baseline Isolation & Provenance
+
+- **Isolated default baseline (`./eval/baseline-web`):** `compare` and `promote` automatically route `web-single` runs to `./eval/baseline-web` (unless overridden via `--baseline`), preventing accidental cross-provider diffs against `./eval/baseline`.
+- **Per-question correlation IDs (`results.json`):** Web runs record `webConversationId` and `webMessageId` on graded and errored rows (useful with `keepConversations: true` or server logs; omitted on SDK runs).
+- **Web provenance (`run_meta.json` & `summary.md`):** In `run_meta.json`, web runs record `answerProvider: "web-single"`, `webBaseUrl`, first-seen `webServerVersion` (parsed from `<span class="build-version">` on `/chat` with `X-App-Version` / `X-Build-Version` header and `<meta name="app-version"|"build-version">` fallbacks; mid-run version drift warns once and keeps the initial version), `mcpServerBaseUrl`, `promptMetadataSource` (`"mcp"` when same-origin, `"mcp-cross-origin"` with conditional `mcpGitSha` when web and MCP origins differ), and `playbookVersion` strictly from the web message trace. `summary.md` renders `specialist (web)` mode, `web target` (with cross-origin note when applicable), plus `web server version`, `mcp git`, and `playbook version` when present.
+
+#### Web CLI Examples
+
+```bash
+# Single question dry-run & live smoke run via eval.sh
+./eval.sh run --provider web --answer-model gemini-3.8-flash --category getting_started --limit 1 --dry-run
+./eval.sh run --provider web --answer-model gemini-3.8-flash --category getting_started --limit 1
+
+# Target a separate/cross-origin yvoke-web instance explicitly via --web-url
+./eval.sh run --provider web --answer-model gemini-3.8-flash --web-url http://localhost:9090 --category getting_started --limit 1
+
+# Full category-by-category web sweep with per-category promotion into ./eval/baseline-web
+./eval-all.sh --provider web --answer-model gemini-3.8-flash --promote ./eval/baseline-web
+```
 
 ### Run Provenance & Metadata (`run_meta.json`)
 

@@ -16,7 +16,10 @@ import {
 } from './compare/BaselineComparator';
 import { promote } from './compare/promote';
 import type { OrchestratorProfile, OrchestratorTuning } from './agent/orchestration';
+import { validateWebCredentials } from './agent/WebChatClient';
 import { UserError, type ThinkingLevel } from './types';
+
+export { validateWebCredentials };
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -340,6 +343,19 @@ export function parseThinkingLevel(value: unknown): ThinkingLevel {
   return s as ThinkingLevel;
 }
 
+function parseHttpUrl(raw: string, label: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new UserError(`Invalid ${label} "${raw}": must be a valid http:// or https:// URL.`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new UserError(`Invalid ${label} "${raw}": must be a valid http:// or https:// URL.`);
+  }
+  return parsed;
+}
+
 /**
  * Resolve a config + CLI flags into a RunConfig. `contentRoot` is the directory holding the config
  * file; every relative path in `cfg` resolves against it.
@@ -362,36 +378,59 @@ export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, co
 
   let answerModel: string;
   if (provider === 'web') {
-    const rawWebModel = (
+    const explicitWebModel = (
       (values['answer-model'] as string | undefined) ??
-      cfg.answer?.web?.model ??
-      (cfg.answer?.provider === 'web' ? cfg.answer?.model : undefined)
+      cfg.answer?.web?.model
     )?.trim();
-    if (!rawWebModel || /^(sonnet|haiku|opus|claude-)/i.test(rawWebModel)) {
+    const fallbackAnswerModel =
+      cfg.answer?.provider === 'web' ? cfg.answer?.model?.trim() : undefined;
+
+    if (explicitWebModel) {
+      answerModel = explicitWebModel;
+    } else if (fallbackAnswerModel && !/^(sonnet|haiku|opus)$/i.test(fallbackAnswerModel)) {
+      answerModel = fallbackAnswerModel;
+    } else {
       throw new UserError(
-        'Web provider requires an explicit web chat model via --answer-model <model> or answer.web.model (e.g. gemini-3.8-flash, gpt-5.4-mini).',
+        'Web provider requires an explicit web chat model via --answer-model <model> or answer.web.model (e.g. gemini-3.8-flash, gpt-5.4-mini, claude-sonnet-5-5).',
       );
     }
-    answerModel = rawWebModel;
   } else {
     answerModel = normalizeModelName((values['answer-model'] as string | undefined) ?? cfg.answer?.model ?? 'sonnet');
   }
 
   const mcpServerBaseUrl = cfg.mcp?.serverBaseUrl ?? 'http://localhost:8080';
+  const parsedMcpUrl = parseHttpUrl(mcpServerBaseUrl, 'mcp.serverBaseUrl');
   let webConfig: RunConfig['web'];
   let questionTimeoutMs = 180_000;
   if (provider === 'web') {
     const webBaseUrl = (
       (values['web-url'] as string | undefined) ??
       cfg.answer?.web?.baseUrl ??
-      new URL(mcpServerBaseUrl).origin
+      parsedMcpUrl.origin
     ).replace(/\/+$/, '');
-    if (new URL(webBaseUrl).origin !== new URL(mcpServerBaseUrl).origin) {
+    const parsedWebUrl = parseHttpUrl(webBaseUrl, '--web-url / answer.web.baseUrl');
+    if (parsedWebUrl.origin !== parsedMcpUrl.origin) {
       console.error(
         `[WARN] Web baseUrl (${webBaseUrl}) and MCP serverBaseUrl (${mcpServerBaseUrl}) have different origins; system prompt / playbook metadata may not match the web server's database.`,
       );
     }
     const timeoutSec = cfg.answer?.web?.questionTimeoutSec ?? 180;
+    if (typeof timeoutSec !== 'number' || !Number.isFinite(timeoutSec) || timeoutSec <= 0) {
+      throw new UserError(
+        `Invalid answer.web.questionTimeoutSec "${String(timeoutSec)}": must be a finite number > 0.`,
+      );
+    }
+    const pollIntervalMs = cfg.answer?.web?.pollIntervalMs ?? 500;
+    if (typeof pollIntervalMs !== 'number' || !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      throw new UserError(
+        `Invalid answer.web.pollIntervalMs "${String(pollIntervalMs)}": must be a finite number > 0.`,
+      );
+    }
+    validateWebCredentials({
+      sessionCookie: cfg.answer?.web?.sessionCookie,
+      username: cfg.answer?.web?.username,
+      password: cfg.answer?.web?.password,
+    });
     questionTimeoutMs = timeoutSec * 1000;
     webConfig = {
       baseUrl: webBaseUrl,
@@ -399,7 +438,7 @@ export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, co
       username: cfg.answer?.web?.username,
       password: cfg.answer?.web?.password,
       sessionCookie: cfg.answer?.web?.sessionCookie,
-      pollIntervalMs: cfg.answer?.web?.pollIntervalMs ?? 500,
+      pollIntervalMs,
       keepConversations: cfg.answer?.web?.keepConversations ?? false,
     };
   }

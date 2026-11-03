@@ -1,4 +1,4 @@
-import { FatalRunError, UserError } from '../types';
+import { FatalRunError, UserError, WebCapacityError } from '../types';
 import type { WebMessageTraceDto } from './webCapture';
 
 export interface WebChatClientOptions {
@@ -7,8 +7,9 @@ export interface WebChatClientOptions {
   password?: string;
   sessionCookie?: string;
   fetchFn?: typeof fetch;
-  /** Optional override for 429 retry backoff delays in ms (default: [1000, 2000, 4000, 8000]). */
+  /** Optional override for 429 retry backoff delays in ms (default: [1000, 2000, 4000, 8000, 15000, 15000]). */
   retryDelaysMs?: number[];
+  log?: (msg: string) => void;
 }
 
 export interface WebStatusResponse {
@@ -20,7 +21,47 @@ export interface WebStatusResponse {
   };
 }
 
-const DEFAULT_429_DELAYS_MS = [1000, 2000, 4000, 8000];
+const DEFAULT_429_DELAYS_MS = [1000, 2000, 4000, 8000, 15000, 15000];
+
+/**
+ * Validates web authentication credentials so empty interpolated env vars fail fast with a clear UserError.
+ */
+export function validateWebCredentials(creds: {
+  sessionCookie?: unknown;
+  username?: unknown;
+  password?: unknown;
+}): void {
+  if (creds.sessionCookie !== undefined) {
+    if (typeof creds.sessionCookie !== 'string' || creds.sessionCookie.trim().length === 0) {
+      throw new UserError(
+        creds.sessionCookie === null || typeof creds.sessionCookie === 'string'
+          ? 'answer.web.sessionCookie is configured but empty (check that the referenced environment variable is set, or remove sessionCookie to use mock form login).'
+          : 'answer.web.sessionCookie must be a non-empty string (quote scalar values in YAML).',
+      );
+    }
+    return;
+  }
+
+  const hasUser = creds.username !== undefined;
+  const hasPass = creds.password !== undefined;
+  if (!hasUser && !hasPass) {
+    return;
+  }
+  if (!hasUser || typeof creds.username !== 'string' || creds.username.trim().length === 0) {
+    throw new UserError(
+      !hasUser || creds.username === null || typeof creds.username === 'string'
+        ? 'answer.web.username is missing or empty (check environment variable interpolation, or omit both username and password for default mock login).'
+        : 'answer.web.username must be a non-empty string (quote numeric usernames in YAML).',
+    );
+  }
+  if (!hasPass || typeof creds.password !== 'string' || creds.password.trim().length === 0) {
+    throw new UserError(
+      !hasPass || creds.password === null || typeof creds.password === 'string'
+        ? 'answer.web.password is missing or empty (check environment variable interpolation, or omit both username and password for default mock login).'
+        : 'answer.web.password must be a non-empty string (quote numeric passwords in YAML).',
+    );
+  }
+}
 
 /**
  * Extracts a Spring Security CSRF token from HTML (<meta name="_csrf" ...> or <input name="_csrf" ...>).
@@ -48,6 +89,133 @@ export function extractCsrfToken(html: string): string | null {
 }
 
 /**
+ * Extracts the Spring Security CSRF header name from HTML (<meta name="_csrf_header" content="...">).
+ */
+export function extractCsrfHeaderName(html: string): string | null {
+  if (!html) return null;
+
+  const metaTags = html.match(/<meta\b[^>]*>/gi) ?? [];
+  for (const tag of metaTags) {
+    if (/\bname\s*=\s*["']_csrf_header["']/i.test(tag)) {
+      const contentMatch = /\bcontent\s*=\s*["']([^"']+)["']/i.exec(tag);
+      const trimmed = contentMatch?.[1]?.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Single-pass HTML entity decoder so nested entities like `&amp;lt;` decode to `&lt;` (never `<`).
+ */
+export function decodeHtmlEntities(raw: string): string {
+  if (!raw || !raw.includes('&')) return raw;
+  return raw.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|quot|apos|lt|gt|amp);/gi, (match, dec?: string, hex?: string) => {
+    if (dec !== undefined) {
+      const cp = Number.parseInt(dec, 10);
+      return Number.isSafeInteger(cp) && cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : match;
+    }
+    if (hex !== undefined) {
+      const cp = Number.parseInt(hex, 16);
+      return Number.isSafeInteger(cp) && cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : match;
+    }
+    switch (match.toLowerCase()) {
+      case '&quot;':
+        return '"';
+      case '&apos;':
+        return "'";
+      case '&lt;':
+        return '<';
+      case '&gt;':
+        return '>';
+      case '&amp;':
+        return '&';
+      default:
+        return match;
+    }
+  });
+}
+
+/**
+ * Creates a fake-timer-compatible timeout AbortSignal and a cleanup function that cancels the timer.
+ */
+export function createTimeoutSignal(ms: number): { signal: AbortSignal; clear: () => void } {
+  const ac = new AbortController();
+  const timer = setTimeout(() => {
+    ac.abort(new Error(`Timed out after ${ms}ms`));
+  }, ms);
+  timer.unref?.();
+  return {
+    signal: ac.signal,
+    clear: () => clearTimeout(timer),
+  };
+}
+
+function extractHtmlAttr(attrs: string, targetName: string): string | null {
+  const lowerTarget = targetName.toLowerCase();
+  const attrRe = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  let m: RegExpExecArray | null;
+  while ((m = attrRe.exec(attrs)) !== null) {
+    if (m[1]?.toLowerCase() === lowerTarget) {
+      return m[2] ?? m[3] ?? m[4] ?? '';
+    }
+  }
+  return null;
+}
+
+/**
+ * Extracts best-effort web server version from HTML:
+ * - Primary: `<span class="... build-version ..." title="...">...</span>` (inner text, falling back to `title`)
+ * - Fallback: `<meta name="app-version"|"build-version" content="...">`
+ */
+export function extractWebVersionFromHtml(html: string): string | null {
+  if (!html) return null;
+
+  const openSpanRe = /<span\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi;
+  let openMatch: RegExpExecArray | null;
+  while ((openMatch = openSpanRe.exec(html)) !== null) {
+    const attrs = openMatch[1] ?? '';
+    const classAttr = extractHtmlAttr(attrs, 'class');
+    if (!classAttr) continue;
+    const classTokens = classAttr.trim().split(/\s+/);
+    if (!classTokens.includes('build-version')) continue;
+
+    if (!attrs.trimEnd().endsWith('/')) {
+      const contentStart = openMatch.index + openMatch[0].length;
+      const closeMatch = /<\/span\s*>/i.exec(html.slice(contentStart));
+      if (closeMatch) {
+        const innerRaw = html.slice(contentStart, contentStart + closeMatch.index);
+        const innerDecoded = decodeHtmlEntities(innerRaw).trim();
+        if (innerDecoded) return innerDecoded;
+      }
+    }
+
+    const titleAttr = extractHtmlAttr(attrs, 'title');
+    if (titleAttr !== null) {
+      const titleDecoded = decodeHtmlEntities(titleAttr).trim();
+      if (titleDecoded) return titleDecoded;
+    }
+  }
+
+  const metaRe = /<meta\b((?:[^>"']|"[^"]*"|'[^']*')*)\/?>/gi;
+  let metaMatch: RegExpExecArray | null;
+  while ((metaMatch = metaRe.exec(html)) !== null) {
+    const attrs = metaMatch[1] ?? '';
+    const nameAttr = extractHtmlAttr(attrs, 'name')?.trim().toLowerCase();
+    if (nameAttr === 'app-version' || nameAttr === 'build-version') {
+      const contentAttr = extractHtmlAttr(attrs, 'content');
+      if (contentAttr !== null) {
+        const decoded = decodeHtmlEntities(contentAttr).trim();
+        if (decoded) return decoded;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Detects whether the HTML body is the Spring Security login form.
  */
 export function isLoginPageHtml(html: string): boolean {
@@ -58,7 +226,7 @@ export function isLoginPageHtml(html: string): boolean {
 /**
  * Extracts available specialized playbook names from GET /chat/{id} (thread.html).
  * Primary: parses window.CHAT_CONFIG's `prompts` JSON array.
- * Fallback: matches `data-prompt-name="([^"]+)"` attributes when window.CHAT_CONFIG is absent.
+ * Fallback: matches `data-prompt-name="([^"]+)"` attributes when window.CHAT_CONFIG is absent or yields no playbook names.
  */
 export function extractPlaybooksFromThreadHtml(html: string): string[] {
   if (!html) return [];
@@ -87,7 +255,9 @@ export function extractPlaybooksFromThreadHtml(html: string): string[] {
                 names.push((item as { name: string }).name);
               }
             }
-            return [...new Set(names)];
+            if (names.length > 0) {
+              return [...new Set(names)];
+            }
           }
         } catch {
           // If JSON.parse fails on non-standard JS literal in a test fixture, try extracting name fields
@@ -96,13 +266,19 @@ export function extractPlaybooksFromThreadHtml(html: string): string[] {
           let m: RegExpExecArray | null;
           while ((m = nameRe.exec(jsonArrayText)) !== null) {
             const rawVal = m[1] ?? m[2] ?? '';
+            let parsedVal = rawVal;
             try {
-              names.push(JSON.parse(`"${rawVal.replace(/"/g, '\\"')}"`));
+              parsedVal = JSON.parse(`"${rawVal.replace(/"/g, '\\"')}"`);
             } catch {
-              names.push(rawVal);
+              parsedVal = rawVal;
+            }
+            if (parsedVal.length > 0) {
+              names.push(parsedVal);
             }
           }
-          return [...new Set(names)];
+          if (names.length > 0) {
+            return [...new Set(names)];
+          }
         }
       }
     }
@@ -115,15 +291,7 @@ export function extractPlaybooksFromThreadHtml(html: string): string[] {
   while ((m = attrRe.exec(html)) !== null) {
     const raw = m[1] ?? m[2] ?? '';
     if (raw.length > 0) {
-      names.push(
-        raw
-          .replace(/&quot;/g, '"')
-          .replace(/&#39;/g, "'")
-          .replace(/&apos;/g, "'")
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&amp;/g, '&'),
-      );
+      names.push(decodeHtmlEntities(raw));
     }
   }
   return [...new Set(names)];
@@ -190,9 +358,15 @@ export class WebChatClient {
   private readonly isCookieMode: boolean;
   private readonly retryDelaysMs: number[];
   private csrfToken: string | null = null;
+  private csrfHeaderName = 'X-CSRF-TOKEN';
+  private htmlServerVersion: string | undefined;
+  private headerServerVersion: string | undefined;
+  private warnedHtmlVersionDrift = false;
+  private warnedHeaderVersionDrift = false;
   private authenticated = false;
 
   constructor(private readonly opts: WebChatClientOptions) {
+    validateWebCredentials(opts);
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
     this.fetchFn = opts.fetchFn ?? fetch;
     this.isCookieMode = Boolean(opts.sessionCookie && opts.sessionCookie.trim().length > 0);
@@ -205,6 +379,55 @@ export class WebChatClient {
 
   getCsrfToken(): string | null {
     return this.csrfToken;
+  }
+
+  getCsrfHeaderName(): string {
+    return this.csrfHeaderName;
+  }
+
+  getServerVersion(): string | undefined {
+    return this.htmlServerVersion ?? this.headerServerVersion;
+  }
+
+  private observeHtmlVersion(raw: string | null | undefined): void {
+    const trimmed = raw?.trim();
+    if (!trimmed) return;
+    if (this.htmlServerVersion === undefined) {
+      this.htmlServerVersion = trimmed;
+      return;
+    }
+    if (this.htmlServerVersion !== trimmed && !this.warnedHtmlVersionDrift) {
+      this.warnedHtmlVersionDrift = true;
+      (this.opts.log ?? console.error)(
+        `[WARN] Web server version changed mid-run from "${this.htmlServerVersion}" to "${trimmed}"; keeping initial version "${this.htmlServerVersion}".`,
+      );
+    }
+  }
+
+  private observeHeaderVersion(raw: string | null | undefined): void {
+    const trimmed = raw?.trim();
+    if (!trimmed) return;
+    if (this.headerServerVersion === undefined) {
+      this.headerServerVersion = trimmed;
+      return;
+    }
+    if (this.headerServerVersion !== trimmed && !this.warnedHeaderVersionDrift) {
+      this.warnedHeaderVersionDrift = true;
+      if (!this.warnedHtmlVersionDrift) {
+        const kept = this.htmlServerVersion ?? this.headerServerVersion;
+        (this.opts.log ?? console.error)(
+          `[WARN] Web server version changed mid-run from "${this.headerServerVersion}" to "${trimmed}"; keeping initial version "${kept}".`,
+        );
+      }
+    }
+  }
+
+  private captureHtmlMeta(html: string): void {
+    const headerName = extractCsrfHeaderName(html);
+    if (headerName) {
+      this.csrfHeaderName = headerName;
+    }
+    this.observeHtmlVersion(extractWebVersionFromHtml(html));
   }
 
   private seedSessionCookie(rawCookie: string): void {
@@ -269,7 +492,7 @@ export class WebChatClient {
     if (method !== 'GET' && method !== 'HEAD') {
       sentCsrf = this.csrfToken;
       if (sentCsrf) {
-        headers.set('X-CSRF-TOKEN', sentCsrf);
+        headers.set(this.csrfHeaderName, sentCsrf);
       }
       if (init.form) {
         const params = new URLSearchParams();
@@ -292,6 +515,7 @@ export class WebChatClient {
       redirect: 'manual',
     });
     this.updateCookiesFromResponse(res);
+    this.observeHeaderVersion(res.headers.get('x-app-version') ?? res.headers.get('x-build-version'));
     return { res, sentCsrf };
   }
 
@@ -305,21 +529,22 @@ export class WebChatClient {
     return false;
   }
 
-  async ensureAuthenticated(): Promise<void> {
+  async ensureAuthenticated(signal?: AbortSignal): Promise<void> {
     if (!this.authenticated) {
-      await this.authenticate();
+      await this.authenticate(signal);
     }
   }
 
-  async authenticate(): Promise<void> {
+  async authenticate(signal?: AbortSignal): Promise<void> {
     if (this.isCookieMode) {
       this.cookies.clear();
       this.seedSessionCookie(this.opts.sessionCookie!);
-      const { res } = await this.rawRequest('/chat', { method: 'GET' });
+      const { res } = await this.rawRequest('/chat', { method: 'GET', signal });
       if (res.status !== 200) {
         throw new UserError('Provided answer.web.sessionCookie is invalid or expired.');
       }
       const html = await res.text();
+      this.captureHtmlMeta(html);
       const csrf = extractCsrfToken(html);
       if (!csrf || isLoginPageHtml(html)) {
         throw new UserError('Provided answer.web.sessionCookie is invalid or expired.');
@@ -332,13 +557,14 @@ export class WebChatClient {
     // Mock Form Login Mode:
     // Step 1: GET /login
     this.cookies.clear();
-    const { res: loginPageRes } = await this.rawRequest('/login', { method: 'GET' });
+    const { res: loginPageRes } = await this.rawRequest('/login', { method: 'GET', signal });
     if (loginPageRes.status !== 200) {
       throw new UserError(
         `yvoke-web at ${this.baseUrl} does not have mock form login enabled. Start yvoke-web with SPRING_PROFILES_ACTIVE=dev and APP_SECURITY_MOCK=true, or configure answer.web.sessionCookie.`,
       );
     }
     const loginHtml = await loginPageRes.text();
+    this.captureHtmlMeta(loginHtml);
     const loginCsrf = extractCsrfToken(loginHtml);
     if (!isLoginPageHtml(loginHtml) || !loginCsrf) {
       throw new UserError(
@@ -352,6 +578,7 @@ export class WebChatClient {
     const password = this.opts.password && this.opts.password.length > 0 ? this.opts.password : 'admin';
     const { res: postLoginRes } = await this.rawRequest('/login', {
       method: 'POST',
+      signal,
       form: {
         username,
         password,
@@ -367,16 +594,17 @@ export class WebChatClient {
       postLoginRes.status >= 400
     ) {
       throw new UserError(
-        `Web login failed for user "${username}". Note: mock auth requires username="admin" for ROLE_ADMIN trace access.`,
+        `Web login failed for user "${username}". Note: trace access requires ROLE_ADMIN or ROLE_AREA_ADMIN (e.g. username="admin" in mock auth).`,
       );
     }
 
     // Step 3: GET /chat with rotated JSESSIONID to verify authenticated session and extract post-auth _csrf
-    const { res: chatRes } = await this.rawRequest('/chat', { method: 'GET' });
+    const { res: chatRes } = await this.rawRequest('/chat', { method: 'GET', signal });
     if (chatRes.status !== 200) {
       throw new UserError('Web login did not establish an authenticated session on /chat.');
     }
     const chatHtml = await chatRes.text();
+    this.captureHtmlMeta(chatHtml);
     const postAuthCsrf = extractCsrfToken(chatHtml);
     if (!postAuthCsrf || isLoginPageHtml(chatHtml)) {
       throw new UserError('Web login did not establish an authenticated session on /chat.');
@@ -395,7 +623,8 @@ export class WebChatClient {
     path: string,
     init: RequestInit & { form?: Record<string, string>; allowChatRedirect?: boolean } = {},
   ): Promise<Response> {
-    await this.ensureAuthenticated();
+    const reqSignal = init.signal ?? undefined;
+    await this.ensureAuthenticated(reqSignal);
     const method = (init.method ?? 'GET').toUpperCase();
     const allowChatRedirect = init.allowChatRedirect === true;
 
@@ -405,7 +634,7 @@ export class WebChatClient {
       if (this.isCookieMode) {
         throw new FatalRunError('Web sessionCookie expired mid-run.');
       }
-      await this.authenticate();
+      await this.authenticate(reqSignal);
       const retry = await this.rawRequest(path, init);
       return retry.res;
     }
@@ -416,7 +645,7 @@ export class WebChatClient {
         if (this.isCookieMode) {
           throw new FatalRunError('Web sessionCookie expired mid-run.');
         }
-        await this.authenticate();
+        await this.authenticate(reqSignal);
         const retry = await this.rawRequest(path, init);
         return retry.res;
       }
@@ -426,12 +655,15 @@ export class WebChatClient {
           if (this.isCookieMode) {
             throw new FatalRunError('Web sessionCookie expired mid-run.');
           }
-          await this.authenticate();
+          await this.authenticate(reqSignal);
           const retry = await this.rawRequest(path, init);
           return retry.res;
         }
+        const prevHeaderName = this.csrfHeaderName;
+        this.captureHtmlMeta(html);
+        const headerChanged = this.csrfHeaderName !== prevHeaderName;
         const newCsrf = extractCsrfToken(html);
-        if (newCsrf && newCsrf !== sentCsrf) {
+        if ((newCsrf && newCsrf !== sentCsrf) || (newCsrf && headerChanged)) {
           this.csrfToken = newCsrf;
           const retry = await this.rawRequest(path, init);
           return retry.res;
@@ -466,6 +698,7 @@ export class WebChatClient {
       throw new Error(`GET /chat/${conversationId} failed with status ${res.status}.`);
     }
     const html = await res.text();
+    this.captureHtmlMeta(html);
     const csrf = extractCsrfToken(html);
     if (csrf) {
       this.csrfToken = csrf;
@@ -507,7 +740,7 @@ export class WebChatClient {
     promptName: string,
     signal?: AbortSignal,
   ): Promise<string> {
-    const maxAttempts = this.retryDelaysMs.length + 1; // 5 total attempts (1 initial + 4 retries)
+    const maxAttempts = this.retryDelaysMs.length + 1; // default: 7 total attempts (1 initial + 6 retries)
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const res = await this.requestWithRecovery(`/chat/${conversationId}/send-async`, {
         method: 'POST',
@@ -520,7 +753,9 @@ export class WebChatClient {
           await sleepAbortable(this.retryDelaysMs[attempt]!, signal);
           continue;
         }
-        throw new Error(`POST /chat/${conversationId}/send-async returned 429 Too Many Requests after ${maxAttempts} attempts.`);
+        throw new WebCapacityError(
+          `Web server concurrency limit reached: POST /chat/${conversationId}/send-async returned HTTP 429 Too Many Requests after ${maxAttempts} attempts.`,
+        );
       }
 
       if (res.status !== 202 && res.status !== 200) {
@@ -567,20 +802,30 @@ export class WebChatClient {
     return (await res.json()) as WebMessageTraceDto;
   }
 
-  async stopConversation(conversationId: string, signal: AbortSignal = AbortSignal.timeout(10_000)): Promise<void> {
-    await this.requestWithRecovery(`/chat/${conversationId}/stop`, {
-      method: 'POST',
-      form: {},
-      signal,
-    });
+  async stopConversation(conversationId: string, signal?: AbortSignal): Promise<void> {
+    const defaultTimeout = signal ? undefined : createTimeoutSignal(10_000);
+    try {
+      await this.requestWithRecovery(`/chat/${conversationId}/stop`, {
+        method: 'POST',
+        form: {},
+        signal: signal ?? defaultTimeout!.signal,
+      });
+    } finally {
+      defaultTimeout?.clear();
+    }
   }
 
-  async deleteConversation(conversationId: string, signal: AbortSignal = AbortSignal.timeout(10_000)): Promise<void> {
-    await this.requestWithRecovery(`/chat/${conversationId}/delete`, {
-      method: 'POST',
-      form: {},
-      signal,
-      allowChatRedirect: true,
-    });
+  async deleteConversation(conversationId: string, signal?: AbortSignal): Promise<void> {
+    const defaultTimeout = signal ? undefined : createTimeoutSignal(10_000);
+    try {
+      await this.requestWithRecovery(`/chat/${conversationId}/delete`, {
+        method: 'POST',
+        form: {},
+        signal: signal ?? defaultTimeout!.signal,
+        allowChatRedirect: true,
+      });
+    } finally {
+      defaultTimeout?.clear();
+    }
   }
 }

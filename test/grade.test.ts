@@ -59,4 +59,31 @@ describe('gradeOne', () => {
     expect(r.verdict.verdict).toBe('ERROR');
     expect(r.error).toBe('quota limit reached');
   });
+
+  it('omits webConversationId and webMessageId on SDK bundles and preserves them on web bundles (normal & error paths)', async () => {
+    const sdkRes = await gradeOne(GOOD_ANSWER.question, GOOD_ANSWER.bundle, passJudge, 100);
+    expect('webConversationId' in sdkRes).toBe(false);
+    expect('webMessageId' in sdkRes).toBe(false);
+
+    const webBundle = mkBundle({
+      answer: GOOD_ANSWER.bundle.answer,
+      providerMeta: {
+        conversationId: 'conv-uuid-123',
+        messageId: 'msg-uuid-456',
+      },
+    });
+    const webRes = await gradeOne(GOOD_ANSWER.question, webBundle, passJudge, 100);
+    expect(webRes.webConversationId).toBe('conv-uuid-123');
+    expect(webRes.webMessageId).toBe('msg-uuid-456');
+
+    const throwingJudge: Judge = {
+      async review() {
+        throw new Error('judge boom');
+      },
+    };
+    const webErrRes = await gradeOne(GOOD_ANSWER.question, webBundle, throwingJudge, 50);
+    expect(webErrRes.verdict.verdict).toBe('ERROR');
+    expect(webErrRes.webConversationId).toBe('conv-uuid-123');
+    expect(webErrRes.webMessageId).toBe('msg-uuid-456');
+  });
 });

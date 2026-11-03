@@ -12,6 +12,7 @@
  * Usage:
  *   npm run eval:all -- --config ../yvoke-eval-oim/yvoke-eval.yaml
  *   npm run eval:all -- --config $CFG --promote ./eval/baseline-sdk-single
+ *   npm run eval:all -- --config $CFG --provider web --answer-model <model> [--web-url <url>] --promote ./eval/baseline-web
  *   npm run eval:all -- --config $CFG --from ts_databases --continue
  */
 import { existsSync, readdirSync, statSync, realpathSync } from 'node:fs';
@@ -21,35 +22,115 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, resolveSuite } from '../src/config/loadConfig';
 import { EvalSpecParser } from '../src/specs/EvalSpecParser';
-import { resolveEvalIntent } from '../src/cli';
-
+import { toRunConfig } from '../src/cli';
+import { UserError } from '../src/types';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(repoRoot, 'src', 'cli.ts');
 const TSX = path.join(repoRoot, 'node_modules', '.bin', 'tsx');
 
+export const RUN_ALL_OPTIONS = {
+  config: { type: 'string' },
+  suite: { type: 'string' },
+  only: { type: 'string' },
+  from: { type: 'string' },
+  promote: { type: 'string' },
+  continue: { type: 'boolean' },
+  'dry-run': { type: 'boolean' },
+  help: { type: 'boolean' },
+  provider: { type: 'string' },
+  'web-url': { type: 'string' },
+  'answer-model': { type: 'string' },
+  'reviewer-model': { type: 'string' },
+  'reviewer-thinking': { type: 'string' },
+  thinking: { type: 'string' },
+  mode: { type: 'string' },
+  eval: { type: 'string' },
+  expect: { type: 'string' },
+  limit: { type: 'string' },
+} as const;
+
+const RUN_PASSTHROUGH_STRING_FLAGS = [
+  'provider',
+  'web-url',
+  'answer-model',
+  'reviewer-model',
+  'reviewer-thinking',
+  'thinking',
+  'mode',
+  'eval',
+  'expect',
+  'limit',
+] as const;
+
 const USAGE = `usage: npm run eval:all -- --config <eval-repo>/yvoke-eval.yaml [options]
 
-  --config <path>     required; the content repository's yvoke-eval.yaml
-  --suite <name>      suite overlay to apply (passed through to every category)
-  --only a,b,c        run only these categories
-  --from <category>   skip categories before this one (resume a stopped sweep)
-  --promote <dir>     promote each category into <dir> as soon as it succeeds
-  --continue          keep going after a category fails (default: stop)
-  --dry-run           plan only, no model calls`;
+  --config <path>             required; the content repository's yvoke-eval.yaml
+  --suite <name>              suite overlay to apply (passed through to every category)
+  --only a,b,c                run only these categories
+  --from <category>           skip categories before this one (resume a stopped sweep)
+  --promote <dir>             promote each category into <dir> as soon as it succeeds
+  --continue                  keep going after a category fails (default: stop)
+  --dry-run                   plan only, no model calls
+  --provider <sdk|web>        answer provider (default: sdk)
+  --web-url <url>             yvoke-web base URL when --provider web
+  --answer-model <model>      answer model override (required for --provider web unless in config)
+  --thinking <level>          answer thinking level (off|low|medium|high)
+  --reviewer-model <model>    judge model override
+  --reviewer-thinking <level> judge thinking level (off|low|medium|high)
+  --mode <single|mas>         execution mode override
+  --eval <intent>             eval intent override (specialist|mas|orchestration)
+  --expect <kind>             filter questions by expect kind (answer|clarify|redirect|refuse)
+  --limit <n>                 per-category question limit
+  --help                      print this help message
+
+examples:
+  npm run eval:all -- --config $CFG --promote ./eval/baseline-sdk-single
+  npm run eval:all -- --config $CFG --provider web --answer-model <model> [--web-url <url>] --promote ./eval/baseline-web`;
+
+export function parseRunAllArgs(args: string[] = process.argv.slice(2)) {
+  return parseArgs({
+    args,
+    options: RUN_ALL_OPTIONS,
+  });
+}
+
+export function buildCliInvocationArgs(
+  subcommandArgs: string[],
+  values: Record<string, unknown>,
+): string[] {
+  const out: string[] = [
+    '--config',
+    path.resolve(String(values.config)),
+    ...(values.suite ? ['--suite', String(values.suite)] : []),
+  ];
+  out.push(...subcommandArgs);
+
+  if (subcommandArgs[0] === 'run') {
+    for (const flag of RUN_PASSTHROUGH_STRING_FLAGS) {
+      const val = values[flag];
+      if (val !== undefined) {
+        out.push(`--${flag}`, String(val));
+      }
+    }
+    if (values['dry-run']) {
+      out.push('--dry-run');
+    }
+  } else if (subcommandArgs[0] === 'promote') {
+    if (values.provider !== undefined) {
+      out.push('--provider', String(values.provider));
+    }
+  }
+
+  return out;
+}
 
 function main(): void {
-  const { values } = parseArgs({
-    options: {
-      config: { type: 'string' },
-      suite: { type: 'string' },
-      only: { type: 'string' },
-      from: { type: 'string' },
-      promote: { type: 'string' },
-      continue: { type: 'boolean' },
-      'dry-run': { type: 'boolean' },
-    },
-  });
+  const { values } = parseRunAllArgs();
+  if (values.help) {
+    console.log(USAGE);
+    return;
+  }
 
   if (!values.config) throw new Error(USAGE);
   const configPath = path.resolve(values.config);
@@ -57,11 +138,9 @@ function main(): void {
 
   const contentRoot = path.dirname(configPath);
   const cfg = resolveSuite(loadConfig(configPath), values.suite);
-  const evalDir = path.isAbsolute(cfg.evalDir ?? './eval')
-    ? (cfg.evalDir ?? './eval')
-    : path.join(contentRoot, cfg.evalDir ?? './eval');
-
-  const evalIntent = resolveEvalIntent(values, cfg);
+  const runConfig = toRunConfig(cfg, values, contentRoot);
+  const evalDir = runConfig.evalDir;
+  const evalIntent = runConfig.evalIntent;
   const categories = selectCategories(evalDir, evalIntent, values.only, values.from);
   if (categories.length === 0) throw new Error(`No categories selected from ${evalDir}.`);
 
@@ -97,11 +176,9 @@ function main(): void {
 }
 
 /** Spawn the CLI for one command, inheriting stdio so progress streams live. */
-function cli(args: string[], values: Record<string, unknown>): boolean {
-  const passthrough: string[] = ['--config', path.resolve(String(values.config))];
-  if (values.suite) passthrough.push('--suite', String(values.suite));
-  if (values['dry-run']) args.push('--dry-run');
-  const r = spawnSync(TSX, [CLI, ...passthrough, ...args], { stdio: 'inherit' });
+function cli(subcommandArgs: string[], values: Record<string, unknown>): boolean {
+  const cliArgs = buildCliInvocationArgs(subcommandArgs, values);
+  const r = spawnSync(TSX, [CLI, ...cliArgs], { stdio: 'inherit' });
   return r.status === 0;
 }
 
@@ -168,8 +245,11 @@ if (isEntryPoint()) {
   try {
     main();
   } catch (e) {
+    if (e instanceof UserError) {
+      console.error(e.message);
+      process.exit(2);
+    }
     console.error(e instanceof Error ? e.message : String(e));
     process.exit(1);
   }
 }
-

@@ -87,4 +87,20 @@ describe('replay module', () => {
     adjustReplaySignals(signals, legacyRecord, evidenceTruncated);
     expect(signals.unverifiedCitations).toBeUndefined(); // cleared to avoid false negative on truncated evidence
   });
+
+  it('preserves webConversationId and webMessageId in buildReplayBundle when present and omits them when absent', () => {
+    const sdkBundle = buildReplayBundle({ answer: 'sdk answer', toolEvidence: [] }).bundle;
+    expect(sdkBundle.providerMeta).toEqual({});
+
+    const webBundle = buildReplayBundle({
+      answer: 'web answer',
+      toolEvidence: [],
+      webConversationId: 'conv-replay-1',
+      webMessageId: 'msg-replay-2',
+    }).bundle;
+    expect(webBundle.providerMeta).toEqual({
+      conversationId: 'conv-replay-1',
+      messageId: 'msg-replay-2',
+    });
+  });
 });

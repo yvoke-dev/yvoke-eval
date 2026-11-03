@@ -158,9 +158,7 @@ export function bundleFromWebTrace(
 
   if (
     rawToolCalls.length === 0 &&
-    (hasWebToolBanner(rawContent) ||
-      rawContent.includes('<clarifying-question>') ||
-      rawChunkIds.length > 0)
+    (hasWebToolBanner(rawContent) || rawChunkIds.length > 0)
   ) {
     throw new FatalRunError(
       'yvoke-web returned 0 toolCalls in trace despite tool activity in the message. Start yvoke-web with APP_CHAT_TRACE_TOOL_CALLS=true (app.chat.trace-tool-calls=true).',
@@ -175,6 +173,8 @@ export function bundleFromWebTrace(
   }));
 
   const cleanedContent = cleanWebTranscript(rawContent);
+  const clarifyingXmlWithoutToolCall =
+    rawToolCalls.length === 0 && cleanedContent.includes('<clarifying-question>');
   let answer = cleanedContent;
   let rawAnswer: string | undefined;
 
@@ -226,6 +226,7 @@ export function bundleFromWebTrace(
       playbookVersion: trace.playbookVersion ?? null,
       messageId: trace.messageId ?? null,
       conversationId: trace.conversationId ?? null,
+      ...(clarifyingXmlWithoutToolCall ? { clarifyingXmlWithoutToolCall: true } : {}),
     },
   };
 }

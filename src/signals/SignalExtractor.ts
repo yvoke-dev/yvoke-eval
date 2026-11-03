@@ -146,7 +146,14 @@ function searchCorpusCollection(t: ToolInvocation): string | null {
   return collectionArg(t.argumentsJson);
 }
 
-/** True when a graph lookup (`search_graph_entities` / `get_graph_neighbors`) returned a markdown table of rows. */
+/**
+ * True when a graph lookup (`search_graph_entities` / `get_graph_neighbors`) returned a markdown table of rows.
+ *
+ * `retrievedCollections` intentionally measures collection-level reachability (matching `search_corpus`
+ * semantics, where retrieving any chunk from a collection marks that collection reached). Specific
+ * entity grounding is guarded separately by `retrievedChunkCount: 0`, deterministic `mustIncludeMissing`
+ * checks, and the verbatim `ToolEvidence` table rows passed directly to the Judge.
+ */
 function isGraphToolWithRows(t: ToolInvocation): boolean {
   const name = stripPrefix(t.name);
   if (name !== 'search_graph_entities' && name !== 'get_graph_neighbors') return false;
@@ -254,4 +261,3 @@ export function containsNeedle(haystack: string, needle: string): boolean {
   }
   return false;
 }
-

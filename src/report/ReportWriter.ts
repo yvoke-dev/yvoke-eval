@@ -182,6 +182,15 @@ export function renderSummary(meta: Record<string, unknown>, results: EvalResult
     sb += `- playbook version: \`${playbookVersion}\`\n`;
   }
   sb += `- answer model: \`${answerModel}\` (thinking: \`${thinkingLevel}\`)\n`;
+  if (typeof meta['webBaseUrl'] === 'string' && meta['webBaseUrl'].length > 0) {
+    sb += `- web target: \`${meta['webBaseUrl']}\`${meta['promptMetadataSource'] === 'mcp-cross-origin' ? ` (prompt metadata from MCP \`${meta['mcpServerBaseUrl']}\` — cross-origin)` : ''}\n`;
+  }
+  if (typeof meta['webServerVersion'] === 'string' && meta['webServerVersion'].length > 0) {
+    sb += `- web server version: \`${meta['webServerVersion']}\`\n`;
+  }
+  if (typeof meta['mcpGitSha'] === 'string' && meta['mcpGitSha'].length > 0) {
+    sb += `- mcp git: \`${meta['mcpGitSha']}\`\n`;
+  }
   sb += `- reviewer model: \`${reviewerModel}\`\n`;
   if (masReviewer !== '—') {
     sb += `- mas reviewer: \`${masReviewer}\`\n`;

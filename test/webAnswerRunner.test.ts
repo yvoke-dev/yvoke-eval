@@ -1,7 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { WebAnswerRunner } from '../src/agent/WebAnswerRunner';
-import { extractPlaybooksFromThreadHtml } from '../src/agent/WebChatClient';
-import { FatalRunError } from '../src/types';
+import {
+  WebChatClient,
+  decodeHtmlEntities,
+  extractCsrfHeaderName,
+  extractPlaybooksFromThreadHtml,
+  extractWebVersionFromHtml,
+} from '../src/agent/WebChatClient';
+import { FatalRunError, UserError, WebCapacityError } from '../src/types';
 import type { PromptSource } from '../src/mcp/McpPrompts';
 import type { EvalTask } from '../src/agent/AnswerBundle';
 import { mkQuestion } from './fixtures';
@@ -98,6 +104,195 @@ describe('extractPlaybooksFromThreadHtml', () => {
   it('falls back to data-prompt-name attributes when window.CHAT_CONFIG is absent', () => {
     const html = MOCK_THREAD_HTML_FALLBACK_CHIPS(['oim-full', 'oim-coding']);
     expect(extractPlaybooksFromThreadHtml(html)).toEqual(['oim-full', 'oim-coding']);
+  });
+
+  it('falls through to data-prompt-name when window.CHAT_CONFIG.prompts is empty, lacks .name, or fails JSON.parse with 0 regex names', () => {
+    const emptyPromptsHtml = `
+      <script>window.CHAT_CONFIG = { prompts: [] };</script>
+      <button data-prompt-name="fallback-empty"></button>
+    `;
+    expect(extractPlaybooksFromThreadHtml(emptyPromptsHtml)).toEqual(['fallback-empty']);
+
+    const missingNameHtml = `
+      <script>window.CHAT_CONFIG = { prompts: [{"slug":"no-name-field"}] };</script>
+      <button data-prompt-name="fallback-no-name"></button>
+    `;
+    expect(extractPlaybooksFromThreadHtml(missingNameHtml)).toEqual(['fallback-no-name']);
+
+    const unparseableNoNameHtml = `
+      <script>window.CHAT_CONFIG = { prompts: [someDynamicRef, { slug: 'still-no-name' }] };</script>
+      <button data-prompt-name="fallback-catch"></button>
+    `;
+    expect(extractPlaybooksFromThreadHtml(unparseableNoNameHtml)).toEqual(['fallback-catch']);
+
+    const entityAttrHtml = `<button data-prompt-name="pb&amp;lt;&#39;1"></button>`;
+    expect(extractPlaybooksFromThreadHtml(entityAttrHtml)).toEqual(["pb&lt;'1"]);
+  });
+});
+
+describe('extractWebVersionFromHtml & decodeHtmlEntities', () => {
+  it('parses real yvoke-web multiline sidebar <span class="build-version"> and multi-class spans', () => {
+    const sidebarHtml = `
+      <aside class="sidebar">
+        <div class="sidebar-footer">
+          <span class="build-version"
+            title="1.4.2-7-gabc1234">1.4.2-7-gabc1234</span>
+        </div>
+      </aside>
+    `;
+    expect(extractWebVersionFromHtml(sidebarHtml)).toBe('1.4.2-7-gabc1234');
+
+    const multiClassHtml = `<div><span class="badge build-version muted">0.9.0-SNAPSHOT</span></div>`;
+    expect(extractWebVersionFromHtml(multiClassHtml)).toBe('0.9.0-SNAPSHOT');
+
+    const nestedOuterSpanHtml = `<span class="footer-meta">Build: <span class="build-version">1.4.2</span></span>`;
+    expect(extractWebVersionFromHtml(nestedOuterSpanHtml)).toBe('1.4.2');
+  });
+
+  it('decodes HTML entities in a single pass and guards out-of-range numeric code points', () => {
+    expect(extractWebVersionFromHtml('<span class="build-version">1.2.3+a&amp;b&#39;rc&#x2f;1</span>')).toBe(
+      "1.2.3+a&b'rc/1",
+    );
+    expect(extractWebVersionFromHtml('<span class="build-version">&amp;lt;</span>')).toBe('&lt;');
+    expect(decodeHtmlEntities('&amp;quot;&amp;lt;')).toBe('&quot;&lt;');
+    expect(extractWebVersionFromHtml('<span class="build-version">&#99999999;</span>')).toBe('&#99999999;');
+    expect(decodeHtmlEntities('&#x110000;')).toBe('&#x110000;');
+  });
+
+  it('does not match substring class names like my-build-version and returns null on login HTML', () => {
+    expect(extractWebVersionFromHtml('<span class="my-build-version">wrong</span>')).toBeNull();
+    expect(extractWebVersionFromHtml('<span class="build-version-extra">wrong</span>')).toBeNull();
+    expect(extractWebVersionFromHtml(MOCK_LOGIN_HTML)).toBeNull();
+  });
+
+  it('falls back to span title attribute when inner text is empty/whitespace, and to <meta> tags when span is absent', () => {
+    expect(extractWebVersionFromHtml('<span class="build-version" title="1.4.2-title&amp;only">   </span>')).toBe(
+      '1.4.2-title&only',
+    );
+    expect(extractWebVersionFromHtml('<meta name="app-version" content="2.4.1-sha999">')).toBe('2.4.1-sha999');
+    expect(extractWebVersionFromHtml('<meta name="build-version" content="2.4.2&amp;dev">')).toBe('2.4.2&dev');
+  });
+});
+
+describe('WebChatClient — credential validation, dynamic _csrf_header, and version capture', () => {
+  it('rejects empty sessionCookie or empty/partial username/password in WebChatClient constructor with UserError', () => {
+    expect(() => new WebChatClient({ baseUrl: 'http://localhost:8080', sessionCookie: '' })).toThrow(UserError);
+    expect(() => new WebChatClient({ baseUrl: 'http://localhost:8080', username: '', password: '' })).toThrow(UserError);
+    expect(() => new WebChatClient({ baseUrl: 'http://localhost:8080', username: 'admin', password: '' })).toThrow(UserError);
+    expect(() => new WebChatClient({ baseUrl: 'http://localhost:8080', username: '', password: 'secret' })).toThrow(UserError);
+    expect(
+      () =>
+        new WebAnswerRunner({
+          baseUrl: 'http://localhost:8080',
+          answerModel: 'gemini-3.8-flash',
+          defaultPlaybook: null,
+          pollIntervalMs: 0,
+          keepConversations: false,
+        }),
+    ).toThrow(UserError);
+  });
+
+  it('extracts custom _csrf_header meta tag, captures first-seen server version from /chat build-version span (never /login), and warns once on mid-run drift', async () => {
+    expect(extractCsrfHeaderName('<meta content="X-XSRF-TOKEN" name="_csrf_header">')).toBe('X-XSRF-TOKEN');
+
+    let seenXsrfHeader: string | null = null;
+    let seenDefaultCsrfHeader: string | null = null;
+    const logs: string[] = [];
+
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const headers = new Headers(init?.headers);
+      if (url.endsWith('/login') && method === 'GET') {
+        return new Response(MOCK_LOGIN_HTML, {
+          status: 200,
+          headers: { 'Set-Cookie': 'JSESSIONID=pre-login; Path=/' },
+        });
+      }
+      if (url.endsWith('/login') && method === 'POST') {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: '/chat', 'Set-Cookie': 'JSESSIONID=post-login; Path=/' },
+        });
+      }
+      if (url.endsWith('/chat') && method === 'GET') {
+        return new Response(
+          `<html><head>
+            <meta name="_csrf" content="xsrf-tok-42">
+            <meta name="_csrf_header" content="X-XSRF-TOKEN">
+          </head><body>
+            <span class="build-version" title="1.9.0">1.9.0</span>
+          </body></html>`,
+          { status: 200 },
+        );
+      }
+      if (url.endsWith('/chat/new') && method === 'POST') {
+        seenXsrfHeader = headers.get('X-XSRF-TOKEN');
+        seenDefaultCsrfHeader = headers.get('X-CSRF-TOKEN');
+        return new Response(null, {
+          status: 302,
+          headers: { Location: '/chat/conv-xsrf' },
+        });
+      }
+      if (url.endsWith('/chat/conv-xsrf') && method === 'GET') {
+        // Rolling deploy mid-run: HTML span now reports 2.0.0
+        return new Response(
+          `<html><head><meta name="_csrf" content="xsrf-tok-42"></head><body>
+            <span class="build-version" title="2.0.0">2.0.0</span>
+          </body></html>`,
+          { status: 200 },
+        );
+      }
+      if (url.endsWith('/chat/conv-xsrf/model') && method === 'POST') {
+        // Subsequent response also carries X-App-Version: 2.0.0 header
+        return new Response(null, {
+          status: 200,
+          headers: { 'X-App-Version': '2.0.0' },
+        });
+      }
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const client = new WebChatClient({
+      baseUrl: 'http://localhost:8080',
+      fetchFn,
+      log: (m) => logs.push(m),
+    });
+
+    await client.authenticate();
+    expect(client.getCsrfHeaderName()).toBe('X-XSRF-TOKEN');
+    expect(client.getServerVersion()).toBe('1.9.0');
+    expect(logs).toHaveLength(0);
+
+    const convId = await client.createConversation();
+    expect(convId).toBe('conv-xsrf');
+    expect(seenXsrfHeader).toBe('xsrf-tok-42');
+    expect(seenDefaultCsrfHeader).toBeNull();
+
+    // HTML span drift (2.0.0) and header drift (2.0.0) preserve first-seen 1.9.0 and warn once:
+    await client.getThreadHtml(convId);
+    await client.setModel(convId, 'gemini-3.8-flash');
+    expect(client.getServerVersion()).toBe('1.9.0');
+    const driftWarnings = logs.filter((l) =>
+      l.includes('[WARN] Web server version changed mid-run from "1.9.0" to "2.0.0"'),
+    );
+    expect(driftWarnings).toHaveLength(1);
+
+    // Also verify <span class="build-version"> takes priority over a proxy X-App-Version header on /chat:
+    const proxyLogs: string[] = [];
+    const proxyClient = new WebChatClient({
+      baseUrl: 'http://localhost:8080',
+      sessionCookie: 'JSESSIONID=valid',
+      log: (m) => proxyLogs.push(m),
+      fetchFn: (async () =>
+        new Response(
+          `<html><head><meta name="_csrf" content="tok"></head><body><span class="build-version">1.9.0-html</span></body></html>`,
+          { status: 200, headers: { 'X-App-Version': '0.1.0-proxy' } },
+        )) as unknown as typeof fetch,
+    });
+    await proxyClient.authenticate();
+    expect(proxyClient.getServerVersion()).toBe('1.9.0-html');
+    expect(proxyLogs).toHaveLength(0);
   });
 });
 
@@ -306,7 +501,7 @@ describe('WebAnswerRunner — Startup preflight checks', () => {
     });
 
     await expect(runner.preflight([mkQuestion({ playbook: 'demo-basics' })], mockPrompts())).rejects.toThrow(
-      /lacks ROLE_ADMIN/,
+      /lacks ROLE_ADMIN or ROLE_AREA_ADMIN/,
     );
     expect(deletedTempConv).toBe(true);
   });
@@ -625,5 +820,297 @@ describe('WebAnswerRunner — Per-question lifecycle, 429 retries, 403 handling,
     await expect(runner.run(mkTask({ abortController: ac }))).rejects.toThrow(/Question timeout/);
     expect(stopSignalAborted).toBe(false);
     expect(deleteSignalAborted).toBe(false);
+  });
+
+  it('throws WebCapacityError with HTTP 429 details when all send-async retry attempts return 429, and attaches webConversationId', async () => {
+    let sendAttempts = 0;
+    let deletedConv = false;
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/chat') && method === 'GET') return new Response(MOCK_CHAT_HTML('csrf-1'), { status: 200 });
+      if (url.endsWith('/chat/new') && method === 'POST') {
+        return new Response(null, { status: 302, headers: { Location: '/chat/conv-429' } });
+      }
+      if (url.endsWith('/model') || url.endsWith('/thinking-level')) return new Response(null, { status: 200 });
+      if (url.endsWith('/send-async') && method === 'POST') {
+        sendAttempts++;
+        return new Response('Too Many Requests', { status: 429 });
+      }
+      if (url.endsWith('/chat/conv-429/delete') && method === 'POST') {
+        deletedConv = true;
+        return new Response(null, { status: 302, headers: { Location: '/chat' } });
+      }
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const runner = new WebAnswerRunner({
+      baseUrl: 'http://localhost:8080',
+      answerModel: 'gemini-3.8-flash',
+      defaultPlaybook: null,
+      sessionCookie: 'valid-cookie',
+      pollIntervalMs: 1,
+      keepConversations: false,
+      fetchFn,
+      retryDelaysMs: [1, 1],
+    });
+
+    let caught: unknown;
+    try {
+      await runner.run(mkTask());
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(WebCapacityError);
+    expect((caught as Error).message).toMatch(/POST \/chat\/conv-429\/send-async returned HTTP 429 Too Many Requests after 3 attempts/);
+    expect((caught as Record<string, unknown>).webConversationId).toBe('conv-429');
+    expect(sendAttempts).toBe(3);
+    expect(deletedConv).toBe(true);
+  });
+
+  it('serializes abort cleanup so task 1 /stop + /delete finish strictly before task 2 /chat/new starts, and attaches webConversationId & webMessageId', async () => {
+    const events: string[] = [];
+    let convCounter = 0;
+    let notifyPollingStarted!: () => void;
+    const pollingStarted = new Promise<void>((resolve) => {
+      notifyPollingStarted = resolve;
+    });
+
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/chat') && method === 'GET') return new Response(MOCK_CHAT_HTML('csrf-1'), { status: 200 });
+      if (url.endsWith('/chat/new') && method === 'POST') {
+        convCounter++;
+        const id = `conv-${convCounter}`;
+        events.push(`create:${id}`);
+        return new Response(null, { status: 302, headers: { Location: `/chat/${id}` } });
+      }
+      if (url.endsWith('/model') || url.endsWith('/thinking-level')) return new Response(null, { status: 200 });
+      if (url.includes('/conv-1/send-async')) {
+        return new Response(JSON.stringify({ assistantMessageId: 'msg-1' }), { status: 202 });
+      }
+      if (url.includes('/conv-1/messages/msg-1/status')) {
+        notifyPollingStarted();
+        return new Response(JSON.stringify({ status: 'generating' }), { status: 200 });
+      }
+      if (url.includes('/conv-1/stop')) {
+        events.push('stop:conv-1:start');
+        await new Promise((r) => setTimeout(r, 30));
+        events.push('stop:conv-1:done');
+        return new Response(null, { status: 200 });
+      }
+      if (url.includes('/conv-1/delete')) {
+        events.push('delete:conv-1:start');
+        await new Promise((r) => setTimeout(r, 30));
+        events.push('delete:conv-1:done');
+        return new Response(null, { status: 302, headers: { Location: '/chat' } });
+      }
+      if (url.includes('/conv-2/send-async')) {
+        return new Response(JSON.stringify({ assistantMessageId: 'msg-2' }), { status: 202 });
+      }
+      if (url.includes('/conv-2/messages/msg-2/status')) {
+        return new Response(JSON.stringify({ status: 'done' }), { status: 200 });
+      }
+      if (url.includes('/conv-2/messages/msg-2/trace')) {
+        return new Response(
+          JSON.stringify({
+            status: 'done',
+            content: '<clarifying-question><question>Which DB?</question></clarifying-question>',
+            toolCalls: [],
+            retrievedChunkIds: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/conv-2/delete')) {
+        events.push('delete:conv-2:done');
+        return new Response(null, { status: 302, headers: { Location: '/chat' } });
+      }
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const logs: string[] = [];
+    const runner = new WebAnswerRunner({
+      baseUrl: 'http://localhost:8080',
+      answerModel: 'gemini-3.8-flash',
+      defaultPlaybook: null,
+      sessionCookie: 'valid-cookie',
+      pollIntervalMs: 50,
+      keepConversations: false,
+      fetchFn,
+      log: (m) => logs.push(m),
+    });
+
+    const ac1 = new AbortController();
+    const task1Promise = runner.run(mkTask({ abortController: ac1 }));
+
+    // Deterministically wait for task 1 to reach /status polling, then abort and start task 2 concurrently:
+    await pollingStarted;
+    const timeoutErr = new Error('Task 1 timed out');
+    ac1.abort(timeoutErr);
+
+    const task2Promise = runner.run(mkTask({ question: mkQuestion({ category: 'basics', id: 'Q2', playbook: 'demo-basics' }) }));
+
+    let caught1: unknown;
+    try {
+      await task1Promise;
+    } catch (e) {
+      caught1 = e;
+    }
+    const bundle2 = await task2Promise;
+
+    expect(caught1).toBe(timeoutErr);
+    expect((caught1 as Record<string, unknown>).webConversationId).toBe('conv-1');
+    expect((caught1 as Record<string, unknown>).webMessageId).toBe('msg-1');
+
+    // Task 1 stop + delete completed strictly BEFORE task 2 POST /chat/new:
+    expect(events).toEqual([
+      'create:conv-1',
+      'stop:conv-1:start',
+      'stop:conv-1:done',
+      'delete:conv-1:start',
+      'delete:conv-1:done',
+      'create:conv-2',
+      'delete:conv-2:done',
+    ]);
+
+    expect(bundle2.answer).toBe('<clarifying-question>Which DB?</clarifying-question>');
+    expect(bundle2.providerMeta?.conversationId).toBe('conv-2');
+    expect(bundle2.providerMeta?.messageId).toBe('msg-2');
+    expect(logs.some((l) => l.includes('[WARN]') && l.includes('basics.Q2'))).toBe(true);
+  });
+
+  it('waits past 15.5s (up to 25s cap) under fake timers when /stop hangs until its 10s timeout and /delete takes 9s (19s total)', async () => {
+    vi.useFakeTimers();
+    try {
+      const events: string[] = [];
+      let convCounter = 0;
+      let notifyPollingStarted!: () => void;
+      const pollingStarted = new Promise<void>((resolve) => {
+        notifyPollingStarted = resolve;
+      });
+
+      const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/chat') && method === 'GET') return new Response(MOCK_CHAT_HTML('csrf-1'), { status: 200 });
+        if (url.endsWith('/chat/new') && method === 'POST') {
+          convCounter++;
+          const id = `conv-${convCounter}`;
+          events.push(`create:${id}`);
+          return new Response(null, { status: 302, headers: { Location: `/chat/${id}` } });
+        }
+        if (url.endsWith('/model') || url.endsWith('/thinking-level')) return new Response(null, { status: 200 });
+        if (url.includes('/conv-1/send-async')) {
+          return new Response(JSON.stringify({ assistantMessageId: 'msg-1' }), { status: 202 });
+        }
+        if (url.includes('/conv-1/messages/msg-1/status')) {
+          notifyPollingStarted();
+          return new Response(JSON.stringify({ status: 'generating' }), { status: 200 });
+        }
+        if (url.includes('/conv-1/stop')) {
+          events.push('stop:conv-1:start');
+          await new Promise<never>((_, reject) => {
+            const sig = init?.signal;
+            if (sig?.aborted) {
+              events.push('stop:conv-1:aborted');
+              reject(sig.reason ?? new Error('Aborted'));
+              return;
+            }
+            sig?.addEventListener(
+              'abort',
+              () => {
+                events.push('stop:conv-1:aborted');
+                reject(sig.reason ?? new Error('Aborted'));
+              },
+              { once: true },
+            );
+          });
+        }
+        if (url.includes('/conv-1/delete')) {
+          events.push('delete:conv-1:start');
+          await new Promise((r) => setTimeout(r, 9_000));
+          events.push('delete:conv-1:done');
+          return new Response(null, { status: 302, headers: { Location: '/chat' } });
+        }
+        if (url.includes('/conv-2/send-async')) {
+          return new Response(JSON.stringify({ assistantMessageId: 'msg-2' }), { status: 202 });
+        }
+        if (url.includes('/conv-2/messages/msg-2/status')) {
+          return new Response(JSON.stringify({ status: 'done' }), { status: 200 });
+        }
+        if (url.includes('/conv-2/messages/msg-2/trace')) {
+          return new Response(
+            JSON.stringify({
+              status: 'done',
+              content: 'Task 2 clean answer',
+              toolCalls: [],
+              retrievedChunkIds: [],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes('/conv-2/delete')) {
+          events.push('delete:conv-2:done');
+          return new Response(null, { status: 302, headers: { Location: '/chat' } });
+        }
+        return new Response(null, { status: 404 });
+      }) as unknown as typeof fetch;
+
+      const runner = new WebAnswerRunner({
+        baseUrl: 'http://localhost:8080',
+        answerModel: 'gemini-3.8-flash',
+        defaultPlaybook: null,
+        sessionCookie: 'valid-cookie',
+        pollIntervalMs: 5_000,
+        keepConversations: false,
+        fetchFn,
+      });
+
+      const ac1 = new AbortController();
+      const task1Outcome = runner.run(mkTask({ abortController: ac1 })).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+
+      await pollingStarted;
+      const timeoutErr = new Error('Task 1 timed out');
+      ac1.abort(timeoutErr);
+
+      const task2Promise = runner.run(
+        mkTask({ question: mkQuestion({ category: 'basics', id: 'Q2', playbook: 'demo-basics' }) }),
+      );
+
+      // Advance to t = 15,500ms (exceeding the old 15s cap): /stop timed out at 10,000ms and /delete is still in progress.
+      await vi.advanceTimersByTimeAsync(15_500);
+      expect(events).toEqual([
+        'create:conv-1',
+        'stop:conv-1:start',
+        'stop:conv-1:aborted',
+        'delete:conv-1:start',
+      ]);
+      expect(events).not.toContain('create:conv-2');
+
+      // Advance to t = 19,000ms: /delete finishes and task 2 proceeds cleanly.
+      await vi.advanceTimersByTimeAsync(3_500);
+      const caught1 = await task1Outcome;
+      const bundle2 = await task2Promise;
+
+      expect(caught1).toBe(timeoutErr);
+      expect(bundle2.answer).toBe('Task 2 clean answer');
+      expect(events).toEqual([
+        'create:conv-1',
+        'stop:conv-1:start',
+        'stop:conv-1:aborted',
+        'delete:conv-1:start',
+        'delete:conv-1:done',
+        'create:conv-2',
+        'delete:conv-2:done',
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

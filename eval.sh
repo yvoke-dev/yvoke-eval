@@ -3,6 +3,7 @@
 # Thin wrapper around the eval CLI that supplies --config for you.
 #
 #   ./eval.sh run --category getting_started --limit 1     # one live question
+#   ./eval.sh run --provider web --answer-model <model> [--web-url <url>] --category getting_started --limit 1
 #   ./eval.sh run --dry-run                                # plan only, no model calls
 #   ./eval.sh compare --run <run-id> --gate
 #   ./eval.sh promote <run-id> --baseline ./eval/baseline-sdk-single

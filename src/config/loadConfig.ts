@@ -25,7 +25,12 @@ export interface MasConfig {
 export interface WebAnswerConfig {
   baseUrl?: string;            // defaults to origin of mcp.serverBaseUrl
   model?: string;              // optional default web model when provider === 'web'
-  defaultPlaybook?: string;    // fallback specialized playbook when q.playbook is null
+  /**
+   * Fallback specialized playbook when `q.playbook` is null.
+   * Note: setting `defaultPlaybook` routes un-annotated questions (`playbook: null`) through that
+   * specialist playbook's system prompt and collection scope rather than free/default chat.
+   */
+  defaultPlaybook?: string;
   username?: string;           // mock-auth login username (e.g. ${YVOKE_WEB_USER:admin})
   password?: string;           // mock-auth login password (e.g. ${YVOKE_WEB_PASSWORD:admin})
   sessionCookie?: string;      // optional pre-authenticated JSESSIONID cookie for non-mock envs
