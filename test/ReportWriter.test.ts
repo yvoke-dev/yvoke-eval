@@ -234,3 +234,41 @@ describe('renderCategoryReport — unverifiedCitations', () => {
   });
 });
 
+describe('ReportWriter — web-single run IDs and mode display', () => {
+  it('prefixes model slug with web- in newRunId and ReportWriter.write when answerProvider starts with web-', () => {
+    expect(newRunId('gemini-3.8-flash', 'abc1234', 'web-single')).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z__web-gemini-3\.8-flash__abc1234$/,
+    );
+    expect(newRunId('claude-sonnet-5-5', 'abc1234', 'sdk-single')).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z__claude-sonnet-5-5__abc1234$/,
+    );
+
+    const results = JSON.parse(readFileSync(baselineResults, 'utf8')) as EvalResult[];
+    const meta = {
+      answerModel: 'gemini-3.8-flash',
+      answerProvider: 'web-single',
+      evalIntent: 'specialist',
+      reviewerModel: 'claude-opus-5-5',
+      thinkingLevel: 'medium',
+      playbookVersion: 4,
+      gitSha: 'websha',
+    };
+    const overviewPath = join(evalDir, 'runs', 'OVERVIEW.md');
+    const { runDir, runId } = new ReportWriter().write(evalDir, meta, results);
+    try {
+      expect(runId).toContain('__web-gemini-3.8-flash__websha');
+      const summary = readFileSync(join(runDir, 'summary.md'), 'utf8');
+      expect(summary).toContain('- mode: `specialist (web)`');
+      expect(summary).toContain('| basics | Q1 |');
+      expect(summary).toContain('| specialist (web) | gemini-3.8-flash |');
+
+      const overview = readFileSync(overviewPath, 'utf8');
+      expect(overview).toContain(`| \`${runId}\` | specialist (web) | v4 |`);
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+      rmSync(overviewPath, { force: true });
+    }
+  });
+});
+
+

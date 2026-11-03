@@ -10,7 +10,15 @@ import type { OrchestrationTrace } from './agent/OrchestrationTrace';
  * Anything else keeps its stack — a stack is the point when the fault is ours.
  */
 export class UserError extends Error {
-  override readonly name = 'UserError';
+  override readonly name: string = 'UserError';
+}
+
+/**
+ * A fatal error discovered mid-run (e.g. APP_CHAT_TRACE_TOOL_CALLS=false or expired sessionCookie)
+ * that requires aborting the question loop immediately after recording the failing question.
+ */
+export class FatalRunError extends UserError {
+  override readonly name = 'FatalRunError';
 }
 
 export type Expect = 'answer' | 'clarify' | 'redirect' | 'refuse';

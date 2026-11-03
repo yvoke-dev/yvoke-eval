@@ -22,11 +22,23 @@ export interface MasConfig {
   specialistMaxTurns?: number;
 }
 
+export interface WebAnswerConfig {
+  baseUrl?: string;            // defaults to origin of mcp.serverBaseUrl
+  model?: string;              // optional default web model when provider === 'web'
+  defaultPlaybook?: string;    // fallback specialized playbook when q.playbook is null
+  username?: string;           // mock-auth login username (e.g. ${YVOKE_WEB_USER:admin})
+  password?: string;           // mock-auth login password (e.g. ${YVOKE_WEB_PASSWORD:admin})
+  sessionCookie?: string;      // optional pre-authenticated JSESSIONID cookie for non-mock envs
+  pollIntervalMs?: number;     // default 500
+  questionTimeoutSec?: number; // default 180
+  keepConversations?: boolean; // default false
+}
+
 export interface EvalConfig {
   evalDir: string;
   baselineDir?: string;
   run: { mode: string; eval?: string; categories: string[]; limit: number; merge: boolean };
-  answer: { model: string; thinkingLevel: string };
+  answer: { provider?: 'sdk' | 'web'; model: string; thinkingLevel: string; web?: WebAnswerConfig };
   mcp: { serverBaseUrl: string; transport: string; bearer: string };
   /**
    * The deployment's web allow-list. Content-repo config, because which domains are worth searching

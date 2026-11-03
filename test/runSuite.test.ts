@@ -19,7 +19,7 @@ import { SYSTEM_PROMPT_NAME } from '../src/server/SystemPromptClient';
 import type { PromptSource } from '../src/mcp/McpPrompts';
 import type { EvalTask } from '../src/agent/AnswerBundle';
 import type { Judge } from '../src/reviewer/Judge';
-import { UserError } from '../src/types';
+import { FatalRunError, UserError } from '../src/types';
 import { mkBundle } from './fixtures';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
@@ -1047,5 +1047,136 @@ describe('Phase 3: Prompt provenance and metadata', () => {
       rmSync(evalDir, { recursive: true, force: true });
     }
   });
+
+  it('Test 11 (Web provider defaultPlaybook propagation across all 4 metadata sites in merge: true and merge: false)', async () => {
+    const evalDir = makeTestEvalDir({
+      getting_started: {
+        Q1: { playbook: null },
+        Q2: { playbook: null },
+      },
+      coding: {
+        Q1: { playbook: 'oim-coding' },
+      },
+    });
+    const h = harness();
+    let preflightCalled = false;
+    h.deps.prompts = {
+      ...h.deps.prompts!,
+      list: async () => [
+        { name: 'oim-full', title: 'Full', description: '', tools: [], systemPrompt: 'oim-full-sys', version: 2 },
+        { name: 'oim-coding', title: 'Coding', description: '', tools: [], systemPrompt: 'oim-coding-sys', version: 3 },
+      ],
+      getText: async (name) => (name === 'oim-full' ? 'FULL PLAYBOOK TEXT' : 'CODING PLAYBOOK TEXT'),
+    };
+    h.deps.fetchFn = (async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes('oim-full-sys')) return new Response(JSON.stringify({ systemPrompt: 'FULL SYS' }), { status: 200 });
+      if (urlStr.includes('oim-coding-sys')) return new Response(JSON.stringify({ systemPrompt: 'CODING SYS' }), { status: 200 });
+      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT SYS' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    h.deps.answerRunner = {
+      preflight: async () => {
+        preflightCalled = true;
+      },
+      run: async (task) =>
+        mkBundle({
+          answer: 'web answer',
+          providerMeta: {
+            resolvedModel: 'gemini-3.8-flash-001',
+            playbook: task.question.playbook,
+            playbookVersion: task.question.playbook === 'oim-full' ? 7 : 3,
+          },
+        }),
+    };
+
+    const webCfgBase = cfg({
+      evalDir,
+      provider: 'web',
+      answerModel: 'gemini-3.8-flash',
+      categories: ['getting_started', 'coding'],
+      limit: 0,
+      web: {
+        baseUrl: 'http://localhost:8080',
+        defaultPlaybook: 'oim-full',
+        pollIntervalMs: 10,
+        keepConversations: false,
+      },
+    });
+
+    // 1. Non-merge mode (per-category run_meta.json)
+    const summaryNonMerge = await runSuite({ ...webCfgBase, merge: false }, () => {}, h.deps);
+    // 2. Merge mode (root run_meta.json)
+    const summaryMerge = await runSuite({ ...webCfgBase, merge: true }, () => {}, h.deps);
+    try {
+      expect(preflightCalled).toBe(true);
+      expect(summaryNonMerge.runDirs).toHaveLength(2);
+      for (const dir of summaryNonMerge.runDirs) {
+        expect(dir).toContain('__web-gemini-3.8-flash__');
+      }
+
+      const gsDir = summaryNonMerge.runDirs.find((d) => d.endsWith('__getting_started'))!;
+      const gsMeta = readMeta(gsDir);
+      expect(gsMeta.answerProvider).toBe('web-single');
+      expect(gsMeta.sdkModel).toBeUndefined();
+      expect(gsMeta.sdkVersion).toBeUndefined();
+      expect(gsMeta.resolvedAnswerModel).toBe('gemini-3.8-flash-001');
+      // defaultPlaybook propagated to catPlaybooks, playbookVersion (from web trace = 7), and systemPromptSha:
+      expect(gsMeta.playbooks).toEqual(['oim-full']);
+      expect(gsMeta.playbookVersion).toBe(7);
+      expect(gsMeta.systemPromptName).toBe('oim-full-sys');
+      expect(gsMeta.systemPromptSha).toBe(sha('FULL SYS\n\n---\n\nFULL PLAYBOOK TEXT'));
+
+      // Meanwhile results.json preserves the original spec question.playbook === null:
+      const gsResults = JSON.parse(readFileSync(join(gsDir, 'results.json'), 'utf8'));
+      expect(gsResults[0].question.playbook).toBeNull();
+
+      // Merge mode root run_meta.json:
+      expect(summaryMerge.runDirs[0]).toContain('__web-gemini-3.8-flash__');
+      const rootMeta = readMeta(summaryMerge.runDirs[0]!);
+      expect(rootMeta.answerProvider).toBe('web-single');
+      expect(rootMeta.playbooks.sort()).toEqual(['oim-coding', 'oim-full']);
+      expect(Object.keys(rootMeta.playbookPrompts).sort()).toEqual(['oim-coding', 'oim-full']);
+      expect(rootMeta.playbookPrompts['oim-full']).toEqual({
+        systemPromptName: 'oim-full-sys',
+        systemPromptSha: sha('FULL SYS\n\n---\n\nFULL PLAYBOOK TEXT'),
+        systemPromptFallback: false,
+      });
+    } finally {
+      summaryNonMerge.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      summaryMerge.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+      rmSync(evalDir, { recursive: true, force: true });
+    }
+  });
 });
+
+describe('runSuite — FatalRunError aborts question loop on first question', () => {
+  it('stops immediately on the first question and sets summary.aborted and summary.abortReason', async () => {
+    const h = harness();
+    let runnerCalls = 0;
+    h.deps.answerRunner = {
+      run: async () => {
+        runnerCalls++;
+        throw new FatalRunError(
+          'yvoke-web returned 0 toolCalls in trace despite tool activity in the message. Start yvoke-web with APP_CHAT_TRACE_TOOL_CALLS=true (app.chat.trace-tool-calls=true).',
+        );
+      },
+    };
+
+    const logs: string[] = [];
+    // limit: 0 on basics has 6 questions; FatalRunError on Q1 must abort before Q2
+    const summary = await runSuite(cfg({ limit: 0 }), (m) => logs.push(m), h.deps);
+    try {
+      expect(runnerCalls).toBe(1);
+      expect(summary.total).toBe(1);
+      expect(summary.error).toBe(1);
+      expect(summary.aborted).toBe(true);
+      expect(summary.abortReason).toContain('APP_CHAT_TRACE_TOOL_CALLS=true');
+      expect(logs.some((l) => l.includes('[ABORT]') && l.includes('APP_CHAT_TRACE_TOOL_CALLS=true'))).toBe(true);
+    } finally {
+      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
+    }
+  });
+});
+
 

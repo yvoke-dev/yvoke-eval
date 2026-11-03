@@ -1,4 +1,6 @@
 import { query, type Options, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { EvalQuestion } from '../types';
+import type { PromptSource } from '../mcp/McpPrompts';
 import type { AnswerBundle, EvalTask } from './AnswerBundle';
 import { bundleFromMessages, type StreamMessage } from './capture';
 import { buildMcpServers, type McpTarget } from './mcpServers';
@@ -15,6 +17,7 @@ export interface SdkRunnerOptions extends McpTarget {
 
 /** The single-mode answer producer, as runSuite consumes it. */
 export interface AnswerRunner {
+  preflight?(questions: EvalQuestion[], prompts: PromptSource): Promise<void>;
   run(task: EvalTask): Promise<AnswerBundle>;
 }
 
