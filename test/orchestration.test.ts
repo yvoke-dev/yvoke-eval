@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { mcpTool } from './fixtures';
+import { UserError } from '../src/types';
 import {
   buildOrchestrator,
   mapSpecialistTools,
@@ -13,7 +14,6 @@ import {
   type OrchestratorTuning,
 } from '../src/agent/orchestration';
 import type { McpPrompts, McpPromptInfo } from '../src/mcp/McpPrompts';
-import type { SystemPromptClient } from '../src/server/SystemPromptClient';
 import { buildAllowedTools } from '../src/agent/policy';
 import { DEFAULT_KB_TOOLS } from '../src/agent/mcpServers';
 
@@ -47,7 +47,7 @@ const tuning: OrchestratorTuning = {
 
 describe('buildOrchestrator', () => {
   it('builds agents for orchestrator, specialists, and reviewer', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     expect(Object.keys(r.agents).sort()).toEqual(
       [ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT, 'oim-getting-started', 'oim-developer-api'].sort(),
     );
@@ -55,7 +55,6 @@ describe('buildOrchestrator', () => {
     expect(r.orchestratorModel).toBe('opus');
 
     const orch = r.agents[ORCHESTRATOR_AGENT];
-    expect(orch.prompt).toContain('BASE'); // orchestrator layers base system prompt
     expect(orch.prompt).toContain('PROMPT(oim-orchestrator)');
     expect(orch.prompt).toContain('oim-getting-started'); // roster
     expect(orch.tools).toContain('Task');
@@ -63,7 +62,6 @@ describe('buildOrchestrator', () => {
     expect(orch.model).toBe('opus');
 
     const specialist = r.agents['oim-getting-started'];
-    expect(specialist.prompt).toContain('BASE'); // base system prompt layered under the playbook
     expect(specialist.prompt).toContain('PROMPT(oim-getting-started)');
     expect(specialist.model).toBe('sonnet');
     expect(specialist.tools).toContain(mcpTool('search_corpus'));
@@ -73,14 +71,13 @@ describe('buildOrchestrator', () => {
     // only tool". `get_section` used to be granted here as well, which graded a reviewer holding a
     // capability production withholds: it returns the whole section around a passage, so claims get
     // judged against neighbouring text no specialist retrieved.
-    expect(r.agents[REVIEWER_SUBAGENT].prompt).not.toContain('BASE'); // reviewer deliberately gets no base prompt
     expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('PROMPT(oim-orchestrator-reviewer)');
     expect(r.agents[REVIEWER_SUBAGENT].tools).toEqual([mcpTool('verify_citations')]);
     expect(r.agents[REVIEWER_SUBAGENT].tools).not.toContain(mcpTool('get_section'));
   });
 
   it('allowedTools unions delegation + specialist tools + reviewer tools', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, null);
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     expect(r.allowedTools).toContain('Task');
     expect(r.allowedTools).toContain(mcpTool('search_corpus'));
     expect(r.allowedTools).toContain(mcpTool('search_graph_entities'));
@@ -93,7 +90,7 @@ describe('buildOrchestrator', () => {
   // it; mas listed it explicitly AND inherited it from every specialist's declared tools, which is
   // why the clarify path was only ever verified in single mode.
   it('keeps ask_clarifying_question out of the session allow-list so the capture still fires', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, null);
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     expect(r.allowedTools).not.toContain(mcpTool('ask_clarifying_question'));
     expect(r.agents[ORCHESTRATOR_AGENT].tools).toContain(mcpTool('ask_clarifying_question'));
   });
@@ -132,22 +129,22 @@ describe('roster resolution', () => {
       specialistPlaybooks: [...profile.specialistPlaybooks, 'oim-standard-search'],
     };
 
-    await expect(buildOrchestrator(bad, tuning, fakePrompts, null)).rejects.toThrow(
+    await expect(buildOrchestrator(bad, tuning, fakePrompts)).rejects.toThrow(
       /oim-standard-search/,
     );
-    await expect(buildOrchestrator(bad, tuning, fakePrompts, null)).rejects.toThrow(
+    await expect(buildOrchestrator(bad, tuning, fakePrompts)).rejects.toThrow(
       /oim-getting-started/, // the available list, so the fix needs no second lookup
     );
   });
 
   it('rejects an unresolvable orchestrator or reviewer, not just specialists', async () => {
     await expect(
-      buildOrchestrator({ ...profile, reviewerPlaybook: 'oim-nope' }, tuning, fakePrompts, null),
+      buildOrchestrator({ ...profile, reviewerPlaybook: 'oim-nope' }, tuning, fakePrompts),
     ).rejects.toThrow(/oim-nope/);
   });
 
   it('accepts a fully resolvable roster', async () => {
-    await expect(buildOrchestrator(profile, tuning, fakePrompts, null)).resolves.toBeDefined();
+    await expect(buildOrchestrator(profile, tuning, fakePrompts)).resolves.toBeDefined();
   });
 });
 
@@ -161,7 +158,7 @@ describe('roster resolution', () => {
  */
 describe('buildOrchestrator — every agent delegates synchronously', () => {
   it('declares background: false on the orchestrator, every specialist, and the reviewer', async () => {
-    const resolved = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const resolved = await buildOrchestrator(profile, tuning, fakePrompts);
     const names = Object.keys(resolved.agents);
     expect(names.length).toBeGreaterThan(2); // orchestrator + specialists + reviewer
     for (const name of names) {
@@ -170,7 +167,7 @@ describe('buildOrchestrator — every agent delegates synchronously', () => {
   });
 
   it('tells the orchestrator to delegate synchronously and to reject a launch receipt', async () => {
-    const resolved = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const resolved = await buildOrchestrator(profile, tuning, fakePrompts);
     const adapter = resolved.agents[ORCHESTRATOR_AGENT].prompt as string;
     expect(adapter).toContain('run_in_background');
     expect(adapter).toContain('Async agent launched successfully');
@@ -192,7 +189,7 @@ describe('buildOrchestrator — every agent delegates synchronously', () => {
  */
 describe('REVIEWER_ADAPTER — cancels the playbook’s submit_review contract', () => {
   it('names submit_review and the playbook section it overrides', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     const prompt = r.agents[REVIEWER_SUBAGENT].prompt as string;
     expect(prompt).toContain('submit_review');
     expect(prompt).toContain('## Verdict');
@@ -200,7 +197,7 @@ describe('REVIEWER_ADAPTER — cancels the playbook’s submit_review contract',
   });
 
   it('keeps the rest of the playbook in force rather than discarding it wholesale', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     const prompt = r.agents[REVIEWER_SUBAGENT].prompt as string;
     expect(prompt).toMatch(/Everything else in the playbook stands unchanged/i);
     // The playbook text itself is still there — the adapter overrides, it does not replace.
@@ -215,36 +212,8 @@ describe('REVIEWER_ADAPTER — cancels the playbook’s submit_review contract',
   });
 });
 
-describe('buildOrchestrator — designated system prompt resolution', () => {
-  it('layers designated system prompts for orchestrator, specialists, and reviewer', async () => {
-    const promptsWithMeta: McpPromptInfo[] = [
-      { name: 'oim-orchestrator', title: 'Orchestrator', description: 'desc', tools: [], codeExecution: false, systemPrompt: 'custom-orch' },
-      { name: 'oim-orchestrator-reviewer', title: 'Reviewer', description: 'desc', tools: [], codeExecution: false, systemPrompt: 'custom-rev' },
-      { name: 'oim-getting-started', title: 'Getting Started', description: 'desc', tools: ['search_corpus'], codeExecution: false, systemPrompt: 'custom-spec' },
-      { name: 'oim-developer-api', title: 'Dev API', description: 'desc', tools: ['search_graph_entities'], codeExecution: false },
-    ];
-    const source = {
-      list: async () => promptsWithMeta,
-      getText: async (name: string) => `PROMPT(${name})`,
-    } as unknown as McpPrompts;
-
-    const mockClient = {
-      get: async (name: string) => {
-        if (name === 'custom-orch') return 'ORCHESTRATOR CUSTOM PROMPT';
-        if (name === 'custom-rev') return 'REVIEWER CUSTOM PROMPT';
-        if (name === 'custom-spec') return 'SPECIALIST CUSTOM PROMPT';
-        return null;
-      },
-    } as unknown as SystemPromptClient;
-
-    const r = await buildOrchestrator(profile, tuning, source, 'DEFAULT_BASE', mockClient);
-    expect(r.agents[ORCHESTRATOR_AGENT].prompt).toContain('ORCHESTRATOR CUSTOM PROMPT');
-    expect(r.agents['oim-getting-started'].prompt).toContain('SPECIALIST CUSTOM PROMPT');
-    expect(r.agents['oim-developer-api'].prompt).toContain('DEFAULT_BASE');
-    expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('REVIEWER CUSTOM PROMPT');
-  });
-
-  it('reviewer runs on playbook alone when no designated prompt, even when promptClient returns default-chat', async () => {
+describe('buildOrchestrator — standalone playbook prompts', () => {
+  it('builds orchestrator, specialist, and reviewer prompts cleanly from playbooks without base prompt', async () => {
     const promptsWithMeta: McpPromptInfo[] = [
       { name: 'oim-orchestrator', title: 'Orchestrator', description: 'desc', tools: [], codeExecution: false },
       { name: 'oim-orchestrator-reviewer', title: 'Reviewer', description: 'desc', tools: [], codeExecution: false },
@@ -256,41 +225,22 @@ describe('buildOrchestrator — designated system prompt resolution', () => {
       getText: async (name: string) => `PROMPT(${name})`,
     } as unknown as McpPrompts;
 
-    const mockClient = {
-      get: async (name: string) => {
-        if (name === 'default-chat') return 'DEFAULT CHAT BASE';
-        return null;
-      },
-    } as unknown as SystemPromptClient;
-
-    const r = await buildOrchestrator(profile, tuning, source, 'DEFAULT_BASE', mockClient);
-    expect(r.agents[ORCHESTRATOR_AGENT].prompt).toContain('DEFAULT_BASE');
-    expect(r.agents[REVIEWER_SUBAGENT].prompt).not.toContain('DEFAULT CHAT BASE');
-    expect(r.agents[REVIEWER_SUBAGENT].prompt).not.toContain('DEFAULT_BASE');
+    const r = await buildOrchestrator(profile, tuning, source);
+    expect(r.agents[ORCHESTRATOR_AGENT].prompt).toContain('PROMPT(oim-orchestrator)');
+    expect(r.agents['oim-getting-started'].prompt).toBe('PROMPT(oim-getting-started)');
+    expect(r.agents['oim-developer-api'].prompt).toBe('PROMPT(oim-developer-api)');
     expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('PROMPT(oim-orchestrator-reviewer)');
   });
 
-  it('reviewer layers default-chat if explicitly designated in prompt metadata', async () => {
-    const promptsWithMeta: McpPromptInfo[] = [
-      { name: 'oim-orchestrator', title: 'Orchestrator', description: 'desc', tools: [], codeExecution: false },
-      { name: 'oim-orchestrator-reviewer', title: 'Reviewer', description: 'desc', tools: [], codeExecution: false, systemPrompt: 'default-chat' },
-      { name: 'oim-getting-started', title: 'Getting Started', description: 'desc', tools: ['search_corpus'], codeExecution: false },
-      { name: 'oim-developer-api', title: 'Dev API', description: 'desc', tools: ['search_graph_entities'], codeExecution: false },
-    ];
-    const source = {
-      list: async () => promptsWithMeta,
-      getText: async (name: string) => `PROMPT(${name})`,
+  it('throws UserError when a playbook returns empty or whitespace instructions', async () => {
+    const emptySource = {
+      list: async () => infos,
+      getText: async (name: string) => (name === 'oim-getting-started' ? '   \n  ' : `PROMPT(${name})`),
     } as unknown as McpPrompts;
 
-    const mockClient = {
-      get: async (name: string) => {
-        if (name === 'default-chat') return 'DEFAULT CHAT BASE';
-        return null;
-      },
-    } as unknown as SystemPromptClient;
-
-    const r = await buildOrchestrator(profile, tuning, source, 'DEFAULT_BASE', mockClient);
-    expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('DEFAULT CHAT BASE');
+    await expect(buildOrchestrator(profile, tuning, emptySource)).rejects.toThrow(
+      new UserError('Playbook "oim-getting-started" returned empty instructions.'),
+    );
   });
 });
 
@@ -312,4 +262,3 @@ describe('EVIDENCE_HEADING and contractual review prompts', () => {
     expect(src).toContain(EVIDENCE_HEADING);
   });
 });
-

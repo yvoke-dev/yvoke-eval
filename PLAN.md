@@ -4,9 +4,9 @@
 > since changed and are *not* corrected below: eval content (suites, graders, baselines, runs) no
 > longer lives in this repo but in a per-knowledge-base content repository selected with `--config`;
 > the MCP server alias is `yvoke`, so tools are `mcp__yvoke__*` rather than `mcp__oim__*`; and §2's
-> claim that the `default-chat` system prompt is fetched over MCP was simply wrong — it is not an MCP
-> prompt, and the harness now reads it over REST from `/api/chat/v1/prompts/system/default-chat`
-> (`SystemPromptClient`), which is also the one exception to "no server-side endpoints" below.
+> claim that the `default-chat` system prompt is fetched over MCP was simply wrong — it was first moved
+> to REST (`/api/chat/v1/prompts/system/default-chat` via `SystemPromptClient`), and subsequently
+> retired altogether in V17 when MCP playbooks became self-contained system prompts.
 > See [README.md](./README.md) for the current shape.
 
 Standalone **TypeScript** project at `/Users/eduardpal/work/yvoke/yvoke-eval`. Answers are produced

@@ -17,7 +17,6 @@ import {
 import type { AnswerBundle } from '../agent/AnswerBundle';
 import { EvalSpecParser } from '../specs/EvalSpecParser';
 import { McpPrompts, type PromptSource, type McpPromptInfo } from '../mcp/McpPrompts';
-import { SystemPromptClient, SYSTEM_PROMPT_NAME } from '../server/SystemPromptClient';
 import { SdkAnswerRunner, type AnswerRunner } from '../agent/SdkAnswerRunner';
 import { WebAnswerRunner } from '../agent/WebAnswerRunner';
 import { MasAnswerRunner } from '../agent/MasAnswerRunner';
@@ -90,10 +89,8 @@ type Logger = (msg: string) => void;
  * wiring, so `runSuite(cfg)` is unchanged; a test overrides only what needs a live server, a Claude
  * subscription, or a subprocess.
  *
- * `fetchFn` is deliberately the transport rather than a `{ get(name) }` system-prompt port. The
- * invariant worth protecting is that the base prompt comes from the server's REST endpoint and *not*
- * from MCP, and only a seam at this level lets a test assert the actual URL — a named port would be
- * satisfiable by an MCP-backed object, which is exactly the regression it exists to catch.
+ * `fetchFn` is passed to `WebAnswerRunner` when running in `--provider web` mode so tests can stub
+ * the HTTP transport offline.
  *
  * Scope rule: `deps` is for collaborators that cross a process boundary. Pure helpers
  * (selectQuestions, loadGrader, the report renderers) stay internal and are unit-tested directly.
@@ -101,7 +98,7 @@ type Logger = (msg: string) => void;
 export interface RunDeps {
   /** Claude subscription probe (reads ~/.claude). */
   credentials: () => ClaudeCredentialStatus;
-  /** Handed to SystemPromptClient, whose own `?? fetch` supplies the global. */
+  /** Handed to WebAnswerRunner for `--provider web` HTTP requests. */
   fetchFn: typeof fetch;
   /** MCP playbook source. */
   prompts: PromptSource;
@@ -204,44 +201,33 @@ export async function runSuite(
       ? new ClaudeOrchestrationJudge(structuredModel, { model: cfg.reviewerModel, systemPrompt: grader.prompt })
       : null);
 
-  // The production base system prompt, so answers are produced under the same grounding and citation
-  // rules as yvoke-desktop. A failure here is fatal by design — see SystemPromptClient.get.
-  const systemPromptClient = new SystemPromptClient({ ...cfg.mcp, fetchFn: deps.fetchFn });
-  const systemPrompt = await systemPromptClient.get(SYSTEM_PROMPT_NAME);
-  log(
-    systemPrompt
-      ? `Loaded ${SYSTEM_PROMPT_NAME} system prompt from the server (${systemPrompt.length} chars).`
-      : `Server has no ${SYSTEM_PROMPT_NAME} system prompt — running with the SDK default.`,
-  );
-
   interface PromptEntry {
-    names: Set<string>;
     shas: Set<string>;
-    fallback: boolean;
   }
 
+  // systemPromptName and systemPromptFallback are preserved as null/false for backward
+  // compatibility with existing run_meta.json consumers and baselines.
   function formatPromptEntry(entry?: PromptEntry) {
-    if (!entry || (entry.names.size === 0 && entry.shas.size === 0)) {
+    if (!entry || entry.shas.size === 0) {
       return {
         systemPromptName: null,
         systemPromptSha: null,
         systemPromptFallback: false,
       };
     }
-    const isVaried = entry.names.size > 1 || entry.shas.size > 1;
-    if (isVaried) {
+    if (entry.shas.size > 1) {
       return {
         systemPromptName: null,
         systemPromptSha: null,
-        systemPromptFallback: entry.fallback,
+        systemPromptFallback: false,
         systemPromptShas: [...entry.shas],
         systemPromptVaried: true as const,
       };
     }
     return {
-      systemPromptName: [...entry.names][0] ?? null,
+      systemPromptName: null,
       systemPromptSha: [...entry.shas][0] ?? null,
-      systemPromptFallback: entry.fallback,
+      systemPromptFallback: false,
     };
   }
 
@@ -260,7 +246,7 @@ export async function runSuite(
   let thinkingLabel: string;
   if (cfg.mode === 'mas') {
     if (!cfg.mas) throw new Error('mas mode requires a resolved profile (cfg.mas).');
-    const orch = await buildOrchestrator(cfg.mas.profile, cfg.mas.tuning, prompts, systemPrompt, systemPromptClient);
+    const orch = await buildOrchestrator(cfg.mas.profile, cfg.mas.tuning, prompts);
     log(`Orchestrator ready: ${orch.specialistNames.length} specialists (${orch.specialistNames.join(', ')}).`);
     const masRunner =
       deps.masAnswerRunner ??
@@ -318,8 +304,6 @@ export async function runSuite(
       const task = await buildEvalTask({ ...q, playbook: effectivePlaybook }, prompts, {
         answerModel: cfg.answerModel,
         thinkingLevel: cfg.thinkingLevel,
-        systemPrompt,
-        systemPromptClient,
       });
       if (ac.signal.aborted) {
         throw ac.signal.reason ?? new Error('Aborted');
@@ -335,12 +319,10 @@ export async function runSuite(
       for (const [map, key] of [[categoryPrompts, catKey], [mergedPlaybookPrompts, pbKey]] as const) {
         let entry = map.get(key);
         if (!entry) {
-          entry = { names: new Set(), shas: new Set(), fallback: false };
+          entry = { shas: new Set() };
           map.set(key, entry);
         }
-        if (task.systemPromptName) entry.names.add(task.systemPromptName);
         if (task.systemPrompt) entry.shas.add(sha256(task.systemPrompt));
-        if (task.systemPromptFallback) entry.fallback = true;
       }
 
       const bundle = await runner.run(task);
@@ -502,7 +484,7 @@ export async function runSuite(
     rootPromptMeta = {
       systemPromptName: null,
       systemPromptSha: null,
-      systemPromptFallback: [...mergedPlaybookPrompts.values()].some((e) => e.fallback),
+      systemPromptFallback: false,
       playbookPrompts: Object.fromEntries(
         [...mergedPlaybookPrompts.entries()].map(([pb, e]) => [pb, formatPromptEntry(e)]),
       ),
@@ -597,7 +579,7 @@ export async function runSuite(
         catPromptMeta = {
           systemPromptName: null,
           systemPromptSha: null,
-          systemPromptFallback: distinctKeys.some((k) => categoryPrompts.get(`${cat}::${k}`)?.fallback ?? false),
+          systemPromptFallback: false,
           playbookPrompts: Object.fromEntries(
             distinctKeys.map((k) => [k, formatPromptEntry(categoryPrompts.get(`${cat}::${k}`))]),
           ),

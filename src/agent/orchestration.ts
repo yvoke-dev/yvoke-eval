@@ -4,8 +4,6 @@ import type { PromptSource, McpPromptInfo } from '../mcp/McpPrompts';
 import { DEFAULT_KB_TOOLS, MCP_SERVER_NAME, qualifyTool } from './mcpServers';
 import { isClarifyTool } from './policy';
 import { COMPUTE_TOOLS } from './computeTools';
-import { resolvePlaybookSystemPrompt } from './buildTask';
-import type { SystemPromptClient } from '../server/SystemPromptClient';
 
 const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 
@@ -216,16 +214,14 @@ nothing. If you want to tabulate the ids you verified, put the table below the f
 
 /**
  * Build the SDK `agents` map + `allowedTools` for orchestrator mode. Ported from
- * yvoke-desktop/src/main/agent/orchestration.ts. Specialists run under the base (default-chat) system
- * prompt with their playbook layered on top; the orchestrator and reviewer use their control playbook
- * as the system prompt. Playbook texts are fetched from MCP.
+ * yvoke-desktop/src/main/agent/orchestration.ts. Orchestrator, specialists, and reviewer each use
+ * their self-contained MCP playbook as their system prompt (with runtime contract adapters appended
+ * for orchestrator and reviewer). Playbook texts are fetched from MCP.
  */
 export async function buildOrchestrator(
   profile: OrchestratorProfile,
   tuning: OrchestratorTuning,
   prompts: PromptSource,
-  baseSystemPrompt: string | null,
-  promptClient?: SystemPromptClient,
 ): Promise<ResolvedOrchestrator> {
   const metadata = await prompts.list();
   const byName = new Map(metadata.map((p) => [p.name, p]));
@@ -248,13 +244,16 @@ export async function buildOrchestrator(
     );
   }
 
-  const textEntries = await Promise.all(names.map(async (name) => [name, await prompts.getText(name)] as const));
+  const textEntries = await Promise.all(
+    names.map(async (name) => {
+      const text = await prompts.getText(name);
+      if (!text || text.trim().length === 0) {
+        throw new UserError(`Playbook "${name}" returned empty instructions.`);
+      }
+      return [name, text.trim()] as const;
+    }),
+  );
   const textByName = new Map(textEntries);
-
-  const resolveDesignated = async (playbookName: string, fallback: string | null): Promise<string | null> => {
-    const raw = byName.get(playbookName)?.systemPrompt;
-    return (await resolvePlaybookSystemPrompt(raw, promptClient, fallback)).text;
-  };
 
   const specialistNames = profile.specialistPlaybooks;
   // No `|| name` fallback: every name is known to resolve by now, and reinstating it would let a
@@ -268,17 +267,9 @@ export async function buildOrchestrator(
 
   const agents: Record<string, AgentDefinition> = {};
 
-  // The orchestrator writes the user-facing answer, so it needs the base prompt's output contract
-  // (bare-id citations, mermaid/KaTeX delimiters) exactly as the specialists do.
-  // It previously got the control playbook alone — the one agent that never saw the contract it was
-  // expected to honour. Playbook last, so its role-specific rules win on any conflict.
-  // Falls back to baseSystemPrompt if no custom prompt is designated, if not found (404), or if empty.
-  const customOrchPrompt = await resolveDesignated(profile.orchestratorPlaybook, baseSystemPrompt);
-  const orchestratorBase = customOrchPrompt ?? baseSystemPrompt;
-  const orchestratorPlaybookText = textByName.get(profile.orchestratorPlaybook) ?? '';
-  const orchestratorPrompt = orchestratorBase
-    ? `${orchestratorBase}\n\n---\n\n${orchestratorPlaybookText}`
-    : orchestratorPlaybookText;
+  // The orchestrator uses its MCP playbook plus the runtime orchestratorAdapter
+  // (which binds specialist names, turn caps, and the final output rule).
+  const orchestratorPrompt = textByName.get(profile.orchestratorPlaybook) ?? '';
 
   const orchestratorTools = [
     DELEGATE_ALLOW_TOKEN,
@@ -303,12 +294,7 @@ export async function buildOrchestrator(
     const info = byName.get(name);
     const tools = mapSpecialistTools(info);
     specialistToolSets.push(tools);
-    const customSpecPrompt = await resolveDesignated(name, baseSystemPrompt);
-    const specialistBase = customSpecPrompt ?? baseSystemPrompt;
-    const playbookText = textByName.get(name) ?? '';
-    const specialistPrompt = specialistBase
-      ? `${specialistBase}\n\n---\n\n${playbookText}`
-      : playbookText;
+    const specialistPrompt = textByName.get(name) ?? '';
     agents[name] = {
       description: info?.description || info?.title || name,
       prompt: specialistPrompt,
@@ -320,15 +306,11 @@ export async function buildOrchestrator(
     };
   }
 
-  // The reviewer runs on its playbook alone (deliberately: no baseSystemPrompt).
-  // If a custom designated system prompt is specified and loads successfully, it is layered on top.
-  // If absent, not found (404), or empty, it falls back to empty string (playbook alone, NO baseSystemPrompt).
-  const customRevPrompt = await resolveDesignated(profile.reviewerPlaybook, null);
-  const reviewerBase = customRevPrompt ? `${customRevPrompt}\n\n---\n\n` : '';
-
+  // The reviewer uses its MCP playbook plus REVIEWER_ADAPTER so its verdict
+  // is returned in the structured format expected by the orchestrator.
   agents[REVIEWER_SUBAGENT] = {
     description: 'Validates the composed answer against the gathered evidence. Never searches anew.',
-    prompt: reviewerBase + (textByName.get(profile.reviewerPlaybook) ?? '') + REVIEWER_ADAPTER,
+    prompt: (textByName.get(profile.reviewerPlaybook) ?? '') + REVIEWER_ADAPTER,
     tools: REVIEWER_TOOLS,
     background: SYNCHRONOUS_DELEGATION,
     model: tuning.reviewer.model,

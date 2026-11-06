@@ -17,8 +17,8 @@ import { isClarifyTool } from '../agent/policy';
  *
  * This must track the **deployed** convention rather than a historical one, because the grader is
  * handed `answer_has_citations` and reads a false there as a citation failure. It had drifted: this
- * recognised only numbered `[1]` markers, while the shipped `default-chat` system prompt now writes
- * bare ids inline and says outright *"Do not number citations and do not write a `## References`
+ * recognised only numbered `[1]` markers, while the shipped playbooks now write
+ * bare ids inline and say outright *"Do not number citations and do not write a `## References`
  * section"*. So every correctly-cited answer reported `hasCitations: false` and was capped at PARTIAL
  * on the citations dimension however good it was — the harness was measuring the one format the
  * prompt forbids.

@@ -20,7 +20,7 @@ export interface ToolEvidence {
 }
 
 /**
- * The input handed to an AnswerProvider. The playbook template text is combined into `systemPrompt`,
+ * The input handed to an AnswerProvider. The playbook template text is passed as `systemPrompt`,
  * and `modelContent` carries only the user question (clean without playbook text).
  */
 export interface EvalTask {
@@ -33,8 +33,6 @@ export interface EvalTask {
   thinkingLevel: ThinkingLevel;
   codeExecution: boolean;
   abortController?: AbortController;
-  systemPromptName?: string | null;
-  systemPromptFallback?: boolean;
   playbookVersion?: number | null;
 }
 

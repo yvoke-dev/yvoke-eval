@@ -79,7 +79,7 @@ describe('ReportWriter — run folder', () => {
       answerModel: 'test-model',
       reviewerModel: 'test-judge',
       thinkingLevel: 'low',
-      systemPromptName: 'default-chat',
+      systemPromptName: null,
       gitSha: 'testsha',
     };
     const overviewPath = join(evalDir, 'runs', 'OVERVIEW.md');

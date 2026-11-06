@@ -53,52 +53,6 @@ describe('retryOnce', () => {
 });
 
 describe('parsePromptInfo — metadata parsing', () => {
-  it('parses systemPrompt from _meta.systemPrompt', () => {
-    const info = parsePromptInfo({
-      name: 'playbook-1',
-      title: 'Playbook 1',
-      description: 'Desc',
-      _meta: { systemPrompt: 'coding-chat' },
-    });
-    expect(info.systemPrompt).toBe('coding-chat');
-  });
-
-  it('parses systemPrompt from _meta.system_prompt', () => {
-    const info = parsePromptInfo({
-      name: 'playbook-2',
-      _meta: { system_prompt: 'coding-chat' },
-    });
-    expect(info.systemPrompt).toBe('coding-chat');
-  });
-
-  it('parses systemPrompt from meta.systemPrompt and meta.system_prompt', () => {
-    const info1 = parsePromptInfo({
-      name: 'playbook-3',
-      meta: { systemPrompt: 'my-chat' },
-    });
-    expect(info1.systemPrompt).toBe('my-chat');
-
-    const info2 = parsePromptInfo({
-      name: 'playbook-4',
-      meta: { system_prompt: 'my-chat-2' },
-    });
-    expect(info2.systemPrompt).toBe('my-chat-2');
-  });
-
-  it('trims whitespace and returns undefined if empty or whitespace-only', () => {
-    const info1 = parsePromptInfo({
-      name: 'playbook-5',
-      _meta: { systemPrompt: '  ' },
-    });
-    expect(info1.systemPrompt).toBeUndefined();
-
-    const info2 = parsePromptInfo({
-      name: 'playbook-6',
-      _meta: {},
-    });
-    expect(info2.systemPrompt).toBeUndefined();
-  });
-
   it('parses integer version from _meta.version and meta.version', () => {
     expect(
       parsePromptInfo({
@@ -122,4 +76,3 @@ describe('parsePromptInfo — metadata parsing', () => {
     ).toBeUndefined();
   });
 });
-
