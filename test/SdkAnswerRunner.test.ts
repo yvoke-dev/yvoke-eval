@@ -35,8 +35,8 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
 });
 
 
-describe('SdkAnswerRunner — Prompt Assembly & Clean User Message', () => {
-  it('passes the combined prompt to options.systemPrompt and only q.question to prompt user message', async () => {
+describe('SdkAnswerRunner — System Prompt & Clean User Message', () => {
+  it('passes task.systemPrompt to options.systemPrompt and only q.question to prompt user message', async () => {
     capturedCalls.length = 0;
     const runner = new SdkAnswerRunner({
       serverBaseUrl: 'http://localhost:8080',
@@ -57,7 +57,7 @@ describe('SdkAnswerRunner — Prompt Assembly & Clean User Message', () => {
       question,
       modelContent: 'What is a widget?',
       answerModel: 'claude-3-5-sonnet',
-      systemPrompt: 'GROUNDING RULES\n\n---\n\nPLAYBOOK TEXT',
+      systemPrompt: 'PLAYBOOK TEXT',
       thinkingLevel: 'low',
       codeExecution: true,
     };
@@ -68,8 +68,8 @@ describe('SdkAnswerRunner — Prompt Assembly & Clean User Message', () => {
     expect(capturedCalls).toHaveLength(1);
     const call = capturedCalls[0]!;
 
-    // options.systemPrompt receives the combined prompt
-    expect(call.options.systemPrompt).toBe('GROUNDING RULES\n\n---\n\nPLAYBOOK TEXT');
+    // options.systemPrompt receives the standalone playbook prompt
+    expect(call.options.systemPrompt).toBe('PLAYBOOK TEXT');
 
     // SDK prompt message receives only q.question
     const userMessages: SDKUserMessage[] = [];
@@ -272,5 +272,3 @@ describe('SdkAnswerRunner — Clarify Override', () => {
     mockQueryStream = undefined;
   });
 });
-
-

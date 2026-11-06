@@ -127,4 +127,3 @@ describe('MasAnswerRunner.run — the enforcement is actually wired', () => {
     expect(src).toMatch(/abortController:\s*opts\?\.abortController/);
   });
 });
-
