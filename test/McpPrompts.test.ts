@@ -1,7 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { retryOnce, parsePromptInfo } from '../src/mcp/McpPrompts';
 
+/**
+ * The server expires idle MCP sessions, and a run leaves this connection idle for the 40-60s the
+ * model spends on each question. Before this retry existed, the first expiry poisoned the rest of
+ * the run: a 7-question category came back 2 PASS / 5 ERROR, every failure `Session not found` in
+ * ~20ms against the same dead session id, never reaching the model.
+ */
 describe('retryOnce', () => {
+  /** connect() hands out a new client id each time, so a test can see WHICH one the op ran on. */
   function harness(failUntilCall: number) {
     const events: string[] = [];
     let connections = 0;
@@ -29,6 +36,8 @@ describe('retryOnce', () => {
     expect(h.events).toEqual(['connect#1', 'op(client#1)']);
   });
 
+  // The heart of it: the retry must run against a FRESH client. Retrying on the same dead session
+  // would reproduce the bug while looking like a fix.
   it('drops the dead connection and retries on a new one', async () => {
     const h = harness(1);
     await expect(retryOnce(h.op, h.connect, h.reset)).resolves.toBe('ok on client#2');

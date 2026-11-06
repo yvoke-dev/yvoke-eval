@@ -411,7 +411,7 @@ export function toRunConfig(cfg: EvalConfig, values: Record<string, unknown>, co
     const parsedWebUrl = parseHttpUrl(webBaseUrl, '--web-url / answer.web.baseUrl');
     if (parsedWebUrl.origin !== parsedMcpUrl.origin) {
       console.error(
-        `[WARN] Web baseUrl (${webBaseUrl}) and MCP serverBaseUrl (${mcpServerBaseUrl}) have different origins; system prompt / playbook metadata may not match the web server's database.`,
+        `[WARN] Web baseUrl (${webBaseUrl}) and MCP serverBaseUrl (${mcpServerBaseUrl}) have different origins; playbook metadata may not match the web server's database.`,
       );
     }
     const timeoutSec = cfg.answer?.web?.questionTimeoutSec ?? 180;

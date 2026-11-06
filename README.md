@@ -19,8 +19,8 @@ Extracted from the in-repo Spring Boot eval IT (`yvoke-web/src/it/java/.../eval`
   - **`--provider sdk` (default):** Answers come from the Claude Agent SDK → MCP (`localhost:8080/mcp`).
     Playbook **prompts, tools, and `codeExecution` are loaded from MCP** (`prompts/list` + `prompts/get`).
     Supports both `single` (any playbook, incl. one specialist) and `mas` (orchestrator + specialists +
-    reviewer). The base system prompt is read from `GET /api/chat/v1/prompts/system/default-chat` (or the
-    playbook's designated system prompt), matching `yvoke-desktop`.
+    reviewer). Each playbook's MCP prompt is self-contained and passed directly as the system prompt (no
+    separate `/api/chat/v1/prompts/system/*` fetch), matching `yvoke-desktop` and `yvoke-web` (V17+).
   - **`--provider web`:** Answers come from `yvoke-web`'s session-authenticated async chat endpoints
     (`/chat/new`, `/send-async`, `/status`, `/trace`) in `single` (specialist) mode, evaluating non-SDK
     or server-hosted chat models (e.g. Gemini, OpenAI, or Claude models configured in `yvoke-web`).
@@ -81,9 +81,14 @@ composed answer includes some orchestrator narration; the `expect:clarify` STOP 
 single mode only. Hardening idea: replace the prompt-contract judge with an in-process
 `record_verdict` SDK tool for guaranteed-schema output.
 
-> Baselines recorded before 2026-07-28 ran with the SDK default system prompt — the harness was
-> asking MCP for `default-chat`, which only ever served playbooks, and swallowing the error. They are
-> not comparable with runs made since; re-baseline rather than diff across the fix.
+> **Historical baseline transitions:**
+> - Baselines recorded before 2026-07-28 ran with the SDK default system prompt — the harness was
+>   asking MCP for `default-chat`, which only ever served playbooks, and swallowing the error.
+> - **V17 lockstep transition:** Playbooks are now self-contained and passed directly as the system prompt
+>   (no `/api/chat/v1/prompts/system/*` composition). `systemPromptSha` now hashes the standalone playbook
+>   text rather than `<basePrompt>\n\n---\n\n<playbook>`, so pre-V17 baselines will report a
+>   `systemPromptSha` mismatch warning and should be re-promoted. Deploy this harness update in lockstep
+>   with `yvoke-web` V17 and self-contained playbook content.
 
 Cutover (P5, done): the old yvoke-web eval harness is fully removed. [CUTOVER.md](./CUTOVER.md) is
 kept as the historical record of that switch — its commands predate the content move and no longer
@@ -201,11 +206,11 @@ Every evaluation run and category writes a `run_meta.json` containing complete p
 - `scoringVersion`: Eval scoring and extraction contract version (e.g. `'2.2'`).
 - `harnessGitSha`: Git commit hash of `yvoke-eval` (with `-dirty` suffix if uncommitted modifications or untracked source files exist).
 - `contentGitSha`: Git commit hash of the external content repo (`cfg.evalDir`).
-- `systemPromptSha` and `systemPromptName`: Scalar SHA-256 hash and designated prompt name. Set to `null` when a run or category used multiple prompts.
-- `systemPromptFallback`: Boolean emitted on every run, category metadata, and `playbookPrompts` entry (`true` if any question fell back to `default-chat` because the designated prompt was empty or failed, `false` when nothing fell back).
+- `systemPromptSha`: Scalar SHA-256 hash of the standalone playbook prompt text passed as the system prompt. Set to `null` when a run or category used multiple playbooks, ran in `mas` mode, or had no playbook.
+- `systemPromptName` and `systemPromptFallback`: Retained as `null` and `false` on every run, category metadata, and `playbookPrompts` entry for backward schema compatibility with existing `run_meta.json` consumers and baselines.
 - `playbookPrompts`: Map of prompt metadata per playbook (including `_no_playbook`) emitted in multi-playbook runs or mixed categories, used uniformly for both merged and category metadata.
-- `_no_playbook`: Public documented key in `playbookPrompts` representing questions evaluated without a playbook (running under `default-chat`).
-- `systemPromptShas` and `systemPromptVaried`: `systemPromptShas: string[]` and `systemPromptVaried: true` are emitted only when questions within a playbook or suite ran under multiple distinct prompts (when prompts varied).
+- `_no_playbook`: Public documented key in `playbookPrompts` representing questions evaluated without a playbook (`systemPrompt: null`, running on the SDK default system prompt).
+- `systemPromptShas` and `systemPromptVaried`: `systemPromptShas: string[]` and `systemPromptVaried: true` are emitted only when questions within a playbook or suite ran under multiple distinct prompt texts.
 
 ### Shell wrappers
 

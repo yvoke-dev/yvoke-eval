@@ -183,7 +183,7 @@ describe('extractSignals', () => {
   });
 
   /**
-   * The deployed `default-chat` prompt writes bare ids inline and forbids numbering and a
+   * The deployed playbooks write bare ids inline and forbid numbering and a
    * References section outright. While this detector matched only `[1]`, every correctly-cited
    * answer reported false and the grader capped it at PARTIAL on citations — measuring the one
    * format the prompt disallows.

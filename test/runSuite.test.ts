@@ -25,10 +25,8 @@ const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
 const EVAL_DIR = join(FIXTURES, 'eval');
 
 /**
- * Wiring tests for runSuite. These exist because SystemPromptClient.test.ts proves the client works
- * but nothing proved runSuite *calls* it — the base prompt used to be fetched over MCP, and reverting
- * to that left the whole suite green. Everything here runs offline: the five collaborators that cross
- * a process boundary are injected, and what remains is fixture files on disk.
+ * Wiring tests for runSuite. Everything here runs offline: the collaborators that cross a process
+ * boundary are injected, and what remains is fixture files on disk.
  *
  * No git stub is needed even though ReportWriter can shell out to `git rev-parse`: it only does so
  * when meta.gitSha is empty, and sanitizeSha always yields at least 'nogit'.
@@ -62,15 +60,9 @@ const passJudge: Judge = {
 };
 
 /** Records every call, so a dep that stops being consulted shows up as an empty array. */
-function harness(systemPromptBody: unknown = { systemPrompt: 'GROUNDING RULES' }, status = 200) {
-  const urls: string[] = [];
+function harness() {
   const askedOverMcp: string[] = [];
   const tasks: EvalTask[] = [];
-
-  const fetchFn = (async (url: string | URL | Request) => {
-    urls.push(String(url));
-    return new Response(JSON.stringify(systemPromptBody), { status });
-  }) as unknown as typeof fetch;
 
   const prompts: PromptSource = {
     list: async () => [{ name: 'demo-basics', title: 'Basics', description: '', tools: ['search_corpus'] }],
@@ -84,7 +76,6 @@ function harness(systemPromptBody: unknown = { systemPrompt: 'GROUNDING RULES' }
 
   const deps: Partial<RunDeps> = {
     credentials: () => 'ok',
-    fetchFn,
     prompts,
     answerRunner: {
       run: async (t) => {
@@ -95,7 +86,7 @@ function harness(systemPromptBody: unknown = { systemPrompt: 'GROUNDING RULES' }
     judge: passJudge,
   };
 
-  return { deps, urls, askedOverMcp, tasks };
+  return { deps, askedOverMcp, tasks };
 }
 
 describe('selectQuestions — --expect filter', () => {
@@ -126,11 +117,11 @@ describe('selectQuestions — --expect filter', () => {
 });
 
 describe('runSuite — standalone playbook instructions', () => {
-  it('threads self-contained playbook text into the answer runner without REST prompt calls', async () => {
+  it('threads self-contained playbook text into the answer runner', async () => {
     const h = harness();
     const summary = await runSuite(cfg(), () => {}, h.deps);
     try {
-      expect(h.urls).toEqual([]);
+      expect(h.askedOverMcp).toEqual(['demo-basics']);
       expect(h.tasks[0]!.systemPrompt).toBe('PLAYBOOK TEXT');
       expect(h.tasks[0]!.modelContent).toBe(h.tasks[0]!.question.question);
       expect(summary.pass).toBe(1);
@@ -141,7 +132,7 @@ describe('runSuite — standalone playbook instructions', () => {
     }
   });
 
-  it('runs on SDK default (null systemPrompt) when playbook template is empty', async () => {
+  it('records ERROR result when playbook template is empty', async () => {
     const h = harness();
     h.deps.prompts = {
       ...h.deps.prompts!,
@@ -149,7 +140,11 @@ describe('runSuite — standalone playbook instructions', () => {
     };
     const summary = await runSuite(cfg(), () => {}, h.deps);
     try {
-      expect(h.tasks[0]!.systemPrompt).toBeNull();
+      expect(h.tasks).toHaveLength(0);
+      expect(summary.error).toBe(1);
+      const results = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'results.json'), 'utf8'));
+      expect(results[0].verdict.verdict).toBe('ERROR');
+      expect(results[0].error).toBe('Playbook "demo-basics" returned empty instructions.');
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
     }
@@ -266,15 +261,7 @@ describe('runSuite — scoring version and provenance', () => {
     }
   });
 
-  it('hashes the exact task system prompt including designated prompt text', async () => {
-    const fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      if (urlStr.includes('oim-structured')) {
-        return new Response(JSON.stringify({ systemPrompt: 'CUSTOM DESIGNATED STRUCTURED PROMPT' }), { status: 200 });
-      }
-      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT CHAT PROMPT' }), { status: 200 });
-    }) as unknown as typeof fetch;
-
+  it('hashes the exact task system prompt from the playbook template', async () => {
     const prompts: PromptSource = {
       list: async () => [
         {
@@ -282,7 +269,6 @@ describe('runSuite — scoring version and provenance', () => {
           title: 'Basics',
           description: '',
           tools: ['search_corpus'],
-          systemPrompt: 'oim-structured',
         },
       ],
       getText: async () => 'PLAYBOOK TEMPLATE TEXT',
@@ -292,7 +278,6 @@ describe('runSuite — scoring version and provenance', () => {
 
     const deps: Partial<RunDeps> = {
       credentials: () => 'ok',
-      fetchFn,
       prompts,
       answerRunner: {
         run: async () => mkBundle({ answer: 'an answer' }),
@@ -549,17 +534,10 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     h.deps.prompts = {
       ...h.deps.prompts!,
       list: async () => [
-        { name: 'demo-basics', title: 'Basics', description: '', tools: [], systemPrompt: 'oim-structured', version: 2 },
+        { name: 'demo-basics', title: 'Basics', description: '', tools: [], version: 2 },
       ],
       getText: async () => 'PLAYBOOK TEMPLATE',
     };
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      if (urlStr.includes('oim-structured')) {
-        return new Response(JSON.stringify({ systemPrompt: 'STRUCTURED BASE' }), { status: 200 });
-      }
-      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
-    }) as unknown as typeof fetch;
 
     const runCfg = cfg({ evalDir, merge: true, categories: ['c1'], limit: 0 });
     const summary = await runSuite(runCfg, () => {}, h.deps);
@@ -576,40 +554,7 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     }
   });
 
-  it('Test 2 (Designated prompt fallback)', async () => {
-    const evalDir = makeTestEvalDir({
-      c1: { Q1: { playbook: 'demo-basics' } },
-    });
-    const h = harness();
-    h.deps.prompts = {
-      ...h.deps.prompts!,
-      list: async () => [
-        { name: 'demo-basics', title: 'Basics', description: '', tools: [], systemPrompt: 'empty-chat' },
-      ],
-      getText: async () => 'PLAYBOOK TEMPLATE',
-    };
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      if (urlStr.includes('empty-chat')) {
-        return new Response(JSON.stringify({ systemPrompt: '' }), { status: 200 });
-      }
-      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
-    }) as unknown as typeof fetch;
-
-    const runCfg = cfg({ evalDir, merge: true, categories: ['c1'], limit: 0 });
-    const summary = await runSuite(runCfg, () => {}, h.deps);
-    try {
-      const meta = readMeta(summary.runDirs[0]!);
-      expect(meta.systemPromptName).toBeNull();
-      expect(meta.systemPromptFallback).toBe(false);
-      expect(meta.systemPromptSha).toBe(sha('PLAYBOOK TEMPLATE'));
-    } finally {
-      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
-      rmSync(evalDir, { recursive: true, force: true });
-    }
-  });
-
-  it('Test 3 (Transient fallback aggregation)', async () => {
+  it('Test 2 (Multiple questions sharing the same playbook produce a single unvaried SHA)', async () => {
     const evalDir = makeTestEvalDir({
       c1: { Q1: { playbook: 'demo-basics' }, Q2: { playbook: 'demo-basics' } },
     });
@@ -617,22 +562,10 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     h.deps.prompts = {
       ...h.deps.prompts!,
       list: async () => [
-        { name: 'demo-basics', title: 'Basics', description: '', tools: [], systemPrompt: 'transient-chat' },
+        { name: 'demo-basics', title: 'Basics', description: '', tools: [] },
       ],
       getText: async () => 'PLAYBOOK TEMPLATE',
     };
-    let transientCallCount = 0;
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      if (urlStr.includes('transient-chat')) {
-        transientCallCount++;
-        if (transientCallCount === 1) {
-          return new Response(JSON.stringify({ systemPrompt: '' }), { status: 200 });
-        }
-        return new Response(JSON.stringify({ systemPrompt: 'CUSTOM BASE' }), { status: 200 });
-      }
-      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
-    }) as unknown as typeof fetch;
 
     const runCfg = cfg({ evalDir, merge: true, categories: ['c1'], limit: 0 });
     const summary = await runSuite(runCfg, () => {}, h.deps);
@@ -657,17 +590,11 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     h.deps.prompts = {
       ...h.deps.prompts!,
       list: async () => [
-        { name: 'pbA', title: 'A', description: '', tools: [], systemPrompt: 'promptA' },
-        { name: 'pbB', title: 'B', description: '', tools: [], systemPrompt: 'promptB' },
+        { name: 'pbA', title: 'A', description: '', tools: [] },
+        { name: 'pbB', title: 'B', description: '', tools: [] },
       ],
       getText: async (name) => (name === 'pbA' ? 'PBA TEMPLATE' : 'PBB TEMPLATE'),
     };
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      if (urlStr.includes('promptA')) return new Response(JSON.stringify({ systemPrompt: 'BASE A' }), { status: 200 });
-      if (urlStr.includes('promptB')) return new Response(JSON.stringify({ systemPrompt: 'BASE B' }), { status: 200 });
-      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT' }), { status: 200 });
-    }) as unknown as typeof fetch;
 
     const runCfg = cfg({ evalDir, merge: false, categories: ['catA', 'catB'], limit: 0 });
     const summary = await runSuite(runCfg, () => {}, h.deps);
@@ -694,7 +621,7 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     const evalDir = makeTestEvalDir({
       plain: { Q1: { playbook: null } },
     });
-    const h = harness({ systemPrompt: 'DEFAULT BASE CHAT' });
+    const h = harness();
     const runCfg = cfg({ evalDir, merge: false, categories: ['plain'], limit: 0 });
     const summary = await runSuite(runCfg, () => {}, h.deps);
     try {
@@ -723,17 +650,11 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     h.deps.prompts = {
       ...h.deps.prompts!,
       list: async () => [
-        { name: 'pb1', title: '1', description: '', tools: [], systemPrompt: 'sys1' },
-        { name: 'pb2', title: '2', description: '', tools: [], systemPrompt: 'sys2' },
+        { name: 'pb1', title: '1', description: '', tools: [] },
+        { name: 'pb2', title: '2', description: '', tools: [] },
       ],
       getText: async (name) => (name === 'pb1' ? 'TEXT 1' : 'TEXT 2'),
     };
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      if (urlStr.includes('sys1')) return new Response(JSON.stringify({ systemPrompt: 'BASE 1' }), { status: 200 });
-      if (urlStr.includes('sys2')) return new Response(JSON.stringify({ systemPrompt: 'BASE 2' }), { status: 200 });
-      return new Response(JSON.stringify({ systemPrompt: 'BASE DEFAULT' }), { status: 200 });
-    }) as unknown as typeof fetch;
 
     const runCfg = cfg({ evalDir, merge: true, categories: ['multi'], limit: 0 });
     const summary = await runSuite(runCfg, () => {}, h.deps);
@@ -864,23 +785,10 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     h.deps.prompts = {
       ...h.deps.prompts!,
       list: async () => [
-        { name: 'oim-full', title: 'Full', description: '', tools: [], systemPrompt: 'oim-full' },
+        { name: 'oim-full', title: 'Full', description: '', tools: [] },
       ],
       getText: async () => 'FULL TEMPLATE',
     };
-    let oimFullCalls = 0;
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      if (urlStr.includes('oim-full')) {
-        oimFullCalls++;
-        // Category `full` runs first (Q1, Q2): call 1 (Q1) returns empty, call 2 (Q2) returns custom
-        if (oimFullCalls === 1) {
-          return new Response(JSON.stringify({ systemPrompt: '' }), { status: 200 });
-        }
-        return new Response(JSON.stringify({ systemPrompt: 'FULL BASE' }), { status: 200 });
-      }
-      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
-    }) as unknown as typeof fetch;
 
     const runCfg = cfg({ evalDir, merge: false, categories: ['full', 'full_ie'], limit: 0 });
     const summary = await runSuite(runCfg, () => {}, h.deps);
@@ -916,17 +824,10 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     h.deps.prompts = {
       ...h.deps.prompts!,
       list: async () => [
-        { name: 'oim-structured', title: 'Struct', description: '', tools: [], systemPrompt: 'oim-structured' },
+        { name: 'oim-structured', title: 'Struct', description: '', tools: [] },
       ],
       getText: async () => 'STRUCT TEMPLATE',
     };
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      if (urlStr.includes('oim-structured')) {
-        return new Response(JSON.stringify({ systemPrompt: 'STRUCT BASE' }), { status: 200 });
-      }
-      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT BASE' }), { status: 200 });
-    }) as unknown as typeof fetch;
 
     const runCfg = cfg({ evalDir, merge: false, categories: ['mixed'], limit: 0 });
     const summary = await runSuite(runCfg, () => {}, h.deps);
@@ -958,17 +859,11 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     h.deps.prompts = {
       ...h.deps.prompts!,
       list: async () => [
-        { name: 'oim-full', title: 'Full', description: '', tools: [], systemPrompt: 'oim-full-sys', version: 2 },
-        { name: 'oim-coding', title: 'Coding', description: '', tools: [], systemPrompt: 'oim-coding-sys', version: 3 },
+        { name: 'oim-full', title: 'Full', description: '', tools: [], version: 2 },
+        { name: 'oim-coding', title: 'Coding', description: '', tools: [], version: 3 },
       ],
       getText: async (name) => (name === 'oim-full' ? 'FULL PLAYBOOK TEXT' : 'CODING PLAYBOOK TEXT'),
     };
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      if (urlStr.includes('oim-full-sys')) return new Response(JSON.stringify({ systemPrompt: 'FULL SYS' }), { status: 200 });
-      if (urlStr.includes('oim-coding-sys')) return new Response(JSON.stringify({ systemPrompt: 'CODING SYS' }), { status: 200 });
-      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT SYS' }), { status: 200 });
-    }) as unknown as typeof fetch;
 
     h.deps.answerRunner = {
       preflight: async () => {
@@ -1123,11 +1018,6 @@ describe('runSuite — production WebAnswerRunner wiring', () => {
     const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       const method = (init?.method ?? 'GET').toUpperCase();
-
-      // SystemPromptClient REST endpoint:
-      if (url.includes('/api/chat/v1/prompts/system/')) {
-        return new Response(JSON.stringify({ systemPrompt: 'WEB BASE SYSTEM PROMPT' }), { status: 200 });
-      }
 
       if (url.endsWith('/login') && method === 'GET') {
         // /login never exposes build-version span in real yvoke-web:
@@ -1812,7 +1702,6 @@ describe('runSuite — production WebAnswerRunner wiring', () => {
           title: 'Late Q1',
           description: '',
           tools: ['search_corpus'],
-          systemPrompt: 'prompt-q1-unused',
           version: 77,
         },
         {

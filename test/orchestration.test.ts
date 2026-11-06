@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { mcpTool } from './fixtures';
+import { UserError } from '../src/types';
 import {
   buildOrchestrator,
   mapSpecialistTools,
@@ -46,7 +47,7 @@ const tuning: OrchestratorTuning = {
 
 describe('buildOrchestrator', () => {
   it('builds agents for orchestrator, specialists, and reviewer', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     expect(Object.keys(r.agents).sort()).toEqual(
       [ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT, 'oim-getting-started', 'oim-developer-api'].sort(),
     );
@@ -70,14 +71,13 @@ describe('buildOrchestrator', () => {
     // only tool". `get_section` used to be granted here as well, which graded a reviewer holding a
     // capability production withholds: it returns the whole section around a passage, so claims get
     // judged against neighbouring text no specialist retrieved.
-    expect(r.agents[REVIEWER_SUBAGENT].prompt).not.toContain('BASE'); // reviewer deliberately gets no base prompt
     expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('PROMPT(oim-orchestrator-reviewer)');
     expect(r.agents[REVIEWER_SUBAGENT].tools).toEqual([mcpTool('verify_citations')]);
     expect(r.agents[REVIEWER_SUBAGENT].tools).not.toContain(mcpTool('get_section'));
   });
 
   it('allowedTools unions delegation + specialist tools + reviewer tools', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, null);
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     expect(r.allowedTools).toContain('Task');
     expect(r.allowedTools).toContain(mcpTool('search_corpus'));
     expect(r.allowedTools).toContain(mcpTool('search_graph_entities'));
@@ -90,7 +90,7 @@ describe('buildOrchestrator', () => {
   // it; mas listed it explicitly AND inherited it from every specialist's declared tools, which is
   // why the clarify path was only ever verified in single mode.
   it('keeps ask_clarifying_question out of the session allow-list so the capture still fires', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, null);
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     expect(r.allowedTools).not.toContain(mcpTool('ask_clarifying_question'));
     expect(r.agents[ORCHESTRATOR_AGENT].tools).toContain(mcpTool('ask_clarifying_question'));
   });
@@ -129,22 +129,22 @@ describe('roster resolution', () => {
       specialistPlaybooks: [...profile.specialistPlaybooks, 'oim-standard-search'],
     };
 
-    await expect(buildOrchestrator(bad, tuning, fakePrompts, null)).rejects.toThrow(
+    await expect(buildOrchestrator(bad, tuning, fakePrompts)).rejects.toThrow(
       /oim-standard-search/,
     );
-    await expect(buildOrchestrator(bad, tuning, fakePrompts, null)).rejects.toThrow(
+    await expect(buildOrchestrator(bad, tuning, fakePrompts)).rejects.toThrow(
       /oim-getting-started/, // the available list, so the fix needs no second lookup
     );
   });
 
   it('rejects an unresolvable orchestrator or reviewer, not just specialists', async () => {
     await expect(
-      buildOrchestrator({ ...profile, reviewerPlaybook: 'oim-nope' }, tuning, fakePrompts, null),
+      buildOrchestrator({ ...profile, reviewerPlaybook: 'oim-nope' }, tuning, fakePrompts),
     ).rejects.toThrow(/oim-nope/);
   });
 
   it('accepts a fully resolvable roster', async () => {
-    await expect(buildOrchestrator(profile, tuning, fakePrompts, null)).resolves.toBeDefined();
+    await expect(buildOrchestrator(profile, tuning, fakePrompts)).resolves.toBeDefined();
   });
 });
 
@@ -158,7 +158,7 @@ describe('roster resolution', () => {
  */
 describe('buildOrchestrator — every agent delegates synchronously', () => {
   it('declares background: false on the orchestrator, every specialist, and the reviewer', async () => {
-    const resolved = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const resolved = await buildOrchestrator(profile, tuning, fakePrompts);
     const names = Object.keys(resolved.agents);
     expect(names.length).toBeGreaterThan(2); // orchestrator + specialists + reviewer
     for (const name of names) {
@@ -167,7 +167,7 @@ describe('buildOrchestrator — every agent delegates synchronously', () => {
   });
 
   it('tells the orchestrator to delegate synchronously and to reject a launch receipt', async () => {
-    const resolved = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const resolved = await buildOrchestrator(profile, tuning, fakePrompts);
     const adapter = resolved.agents[ORCHESTRATOR_AGENT].prompt as string;
     expect(adapter).toContain('run_in_background');
     expect(adapter).toContain('Async agent launched successfully');
@@ -189,7 +189,7 @@ describe('buildOrchestrator — every agent delegates synchronously', () => {
  */
 describe('REVIEWER_ADAPTER — cancels the playbook’s submit_review contract', () => {
   it('names submit_review and the playbook section it overrides', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     const prompt = r.agents[REVIEWER_SUBAGENT].prompt as string;
     expect(prompt).toContain('submit_review');
     expect(prompt).toContain('## Verdict');
@@ -197,7 +197,7 @@ describe('REVIEWER_ADAPTER — cancels the playbook’s submit_review contract',
   });
 
   it('keeps the rest of the playbook in force rather than discarding it wholesale', async () => {
-    const r = await buildOrchestrator(profile, tuning, fakePrompts, 'BASE');
+    const r = await buildOrchestrator(profile, tuning, fakePrompts);
     const prompt = r.agents[REVIEWER_SUBAGENT].prompt as string;
     expect(prompt).toMatch(/Everything else in the playbook stands unchanged/i);
     // The playbook text itself is still there — the adapter overrides, it does not replace.
@@ -231,6 +231,17 @@ describe('buildOrchestrator — standalone playbook prompts', () => {
     expect(r.agents['oim-developer-api'].prompt).toBe('PROMPT(oim-developer-api)');
     expect(r.agents[REVIEWER_SUBAGENT].prompt).toContain('PROMPT(oim-orchestrator-reviewer)');
   });
+
+  it('throws UserError when a playbook returns empty or whitespace instructions', async () => {
+    const emptySource = {
+      list: async () => infos,
+      getText: async (name: string) => (name === 'oim-getting-started' ? '   \n  ' : `PROMPT(${name})`),
+    } as unknown as McpPrompts;
+
+    await expect(buildOrchestrator(profile, tuning, emptySource)).rejects.toThrow(
+      new UserError('Playbook "oim-getting-started" returned empty instructions.'),
+    );
+  });
 });
 
 describe('needsReviewEnforcement', () => {
@@ -251,4 +262,3 @@ describe('EVIDENCE_HEADING and contractual review prompts', () => {
     expect(src).toContain(EVIDENCE_HEADING);
   });
 });
-

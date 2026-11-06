@@ -1,36 +1,16 @@
-import type { EvalQuestion, ThinkingLevel } from '../types';
+import { UserError, type EvalQuestion, type ThinkingLevel } from '../types';
 import type { EvalTask } from './AnswerBundle';
 import type { PromptSource } from '../mcp/McpPrompts';
 
 export interface BuildTaskOptions {
   answerModel: string;
   thinkingLevel: ThinkingLevel;
-  systemPrompt?: string | null;
-  systemPromptClient?: unknown;
-}
-
-export interface ResolvedSystemPrompt {
-  text: string | null;
-  name: string | null;
-  fallback: boolean;
 }
 
 /**
- * Resolves the system prompt for a playbook.
- * If the playbook designates a custom system prompt name, attempts to load it via SystemPromptClient.
- * Falls back to default-chat (or defaultPrompt) when absent, empty, or on resolution error.
- */
-export async function resolvePlaybookSystemPrompt(
-  _designatedName?: string | undefined | null,
-  _client?: unknown,
-  _defaultPrompt?: string | null,
-): Promise<ResolvedSystemPrompt> {
-  return { text: null, name: null, fallback: false };
-}
-
-/**
- * Build one EvalTask by resolving the question's playbook from MCP and combining the playbook
- * template text into the LLM system prompt: <systemPrompt>\n\n---\n\n<playbookText>.
+ * Build one EvalTask by resolving the question's self-contained playbook from
+ * MCP and setting it directly as the LLM system prompt.
+ *
  * The user query (modelContent) contains only q.question without playbook text prepended.
  */
 export async function buildEvalTask(
@@ -38,7 +18,7 @@ export async function buildEvalTask(
   prompts: PromptSource,
   opts: BuildTaskOptions,
 ): Promise<EvalTask> {
-  let template = '';
+  let systemPrompt: string | null = null;
   let playbookTools: string[] | undefined;
   let codeExecution = true;
   let playbookVersion: number | null = null;
@@ -49,11 +29,12 @@ export async function buildEvalTask(
     playbookTools = info?.tools;
     codeExecution = info?.codeExecution !== false;
     playbookVersion = info?.version ?? null;
-    template = await prompts.getText(q.playbook);
+    const template = await prompts.getText(q.playbook);
+    if (!template || template.trim().length === 0) {
+      throw new UserError(`Playbook "${q.playbook}" returned empty instructions.`);
+    }
+    systemPrompt = template.trim();
   }
-
-  const hasTemplate = template && template.trim().length > 0;
-  const systemPrompt = hasTemplate ? template : null;
 
   return {
     question: q,
@@ -63,8 +44,6 @@ export async function buildEvalTask(
     playbookTools,
     thinkingLevel: opts.thinkingLevel,
     codeExecution,
-    systemPromptName: null,
-    systemPromptFallback: false,
     playbookVersion,
   };
 }
