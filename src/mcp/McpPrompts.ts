@@ -14,7 +14,6 @@ export interface McpPromptInfo {
   description: string;
   tools?: string[];
   codeExecution?: boolean;
-  systemPrompt?: string;
   version?: number;
 }
 
@@ -50,13 +49,6 @@ export function parsePromptInfo(p: unknown): McpPromptInfo {
     _meta?: Record<string, unknown>;
   };
   const meta = raw.meta ?? raw._meta;
-  const rawPrompt =
-    raw._meta?.systemPrompt ??
-    raw._meta?.system_prompt ??
-    raw.meta?.systemPrompt ??
-    raw.meta?.system_prompt;
-  const systemPrompt =
-    typeof rawPrompt === 'string' && rawPrompt.trim().length > 0 ? rawPrompt.trim() : undefined;
   const rawVersion = raw._meta?.version ?? raw.meta?.version;
   const version =
     typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion >= 1
@@ -69,7 +61,6 @@ export function parsePromptInfo(p: unknown): McpPromptInfo {
     description: raw.description ?? '',
     tools: Array.isArray(meta?.tools) ? (meta!.tools as unknown[]).map(String) : undefined,
     codeExecution: typeof meta?.codeExecution === 'boolean' ? (meta.codeExecution as boolean) : undefined,
-    systemPrompt,
     version,
   };
 }

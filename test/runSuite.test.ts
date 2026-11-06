@@ -15,11 +15,10 @@ import {
   type RunConfig,
   type RunDeps,
 } from '../src/run/runSuite';
-import { SYSTEM_PROMPT_NAME } from '../src/server/SystemPromptClient';
 import type { PromptSource } from '../src/mcp/McpPrompts';
 import type { EvalTask } from '../src/agent/AnswerBundle';
 import type { Judge } from '../src/reviewer/Judge';
-import { FatalRunError, UserError } from '../src/types';
+import { FatalRunError } from '../src/types';
 import { mkBundle } from './fixtures';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
@@ -126,43 +125,15 @@ describe('selectQuestions — --expect filter', () => {
   });
 });
 
-describe('runSuite — base system prompt wiring', () => {
-  it('fetches it over REST, never over MCP, and threads it into the answer runner', async () => {
+describe('runSuite — standalone playbook instructions', () => {
+  it('threads self-contained playbook text into the answer runner without REST prompt calls', async () => {
     const h = harness();
     const summary = await runSuite(cfg(), () => {}, h.deps);
     try {
-      // Pinned by URL, not by collaborator name: MCP cannot produce this path, so no MCP-backed
-      // implementation can satisfy the assertion.
-      expect(h.urls).toEqual(['http://localhost:8080/api/chat/v1/prompts/system/default-chat']);
-      expect(h.askedOverMcp).not.toContain(SYSTEM_PROMPT_NAME);
-      // The fetched text reaches the model, combined with the playbook template text.
-      expect(h.tasks[0]!.systemPrompt).toBe('GROUNDING RULES\n\n---\n\nPLAYBOOK TEXT');
-      expect(h.tasks[0]!.modelContent).toBe(h.tasks[0]!.question.question);
-      expect(h.tasks[0]!.modelContent).not.toContain('PLAYBOOK TEXT');
-      expect(summary.pass).toBe(1);
-    } finally {
-      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
-    }
-  });
-
-  it('records which prompt the answers ran under', async () => {
-    const h = harness();
-    const summary = await runSuite(cfg(), () => {}, h.deps);
-    try {
-      const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
-      expect(meta.systemPromptName).toBe(SYSTEM_PROMPT_NAME);
-    } finally {
-      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
-    }
-  });
-
-  it('runs on the SDK default when the server has no such prompt, and says so in run_meta', async () => {
-    // 200 + "" is the server's own "no prompt configured" answer (the controller's orElse("")).
-    const h = harness({ systemPrompt: '' });
-    const summary = await runSuite(cfg(), () => {}, h.deps);
-    try {
-      // With a playbook and no server base prompt, systemPrompt contains only the playbook text.
+      expect(h.urls).toEqual([]);
       expect(h.tasks[0]!.systemPrompt).toBe('PLAYBOOK TEXT');
+      expect(h.tasks[0]!.modelContent).toBe(h.tasks[0]!.question.question);
+      expect(summary.pass).toBe(1);
       const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
       expect(meta.systemPromptName).toBeNull();
     } finally {
@@ -170,8 +141,8 @@ describe('runSuite — base system prompt wiring', () => {
     }
   });
 
-  it('runs on SDK default (null systemPrompt) when both server prompt and playbook template are empty', async () => {
-    const h = harness({ systemPrompt: '' });
+  it('runs on SDK default (null systemPrompt) when playbook template is empty', async () => {
+    const h = harness();
     h.deps.prompts = {
       ...h.deps.prompts!,
       getText: async () => '',
@@ -179,72 +150,6 @@ describe('runSuite — base system prompt wiring', () => {
     const summary = await runSuite(cfg(), () => {}, h.deps);
     try {
       expect(h.tasks[0]!.systemPrompt).toBeNull();
-    } finally {
-      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
-    }
-  });
-
-  it('aborts the whole run when the endpoint errors, rather than degrading quietly', async () => {
-    const h = harness({}, 500);
-    // Fatal by design: a run without the production prompt is comparable neither to production nor
-    // to the baseline, so it must not silently produce gradeable results.
-    await expect(runSuite(cfg(), () => {}, h.deps)).rejects.toThrow(UserError);
-    expect(h.tasks).toHaveLength(0);
-  });
-});
-
-describe('runSuite — playbook-designated system prompt resolution', () => {
-  it('resolves designated system prompt over REST and combines with playbook', async () => {
-    const h = harness();
-    h.deps.prompts = {
-      ...h.deps.prompts!,
-      list: async () => [
-        { name: 'demo-basics', title: 'Basics', description: '', tools: ['search_corpus'], systemPrompt: 'coding-chat' },
-      ],
-    };
-    const promptsReturned: Record<string, string> = {
-      'default-chat': 'DEFAULT RULES',
-      'coding-chat': 'CODING RULES',
-    };
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      h.urls.push(urlStr);
-      const name = decodeURIComponent(urlStr.split('/').pop() ?? '');
-      return new Response(JSON.stringify({ systemPrompt: promptsReturned[name] ?? '' }), { status: 200 });
-    }) as unknown as typeof fetch;
-
-    const summary = await runSuite(cfg(), () => {}, h.deps);
-    try {
-      expect(h.urls).toContain('http://localhost:8080/api/chat/v1/prompts/system/default-chat');
-      expect(h.urls).toContain('http://localhost:8080/api/chat/v1/prompts/system/coding-chat');
-      expect(h.tasks[0]!.systemPrompt).toBe('CODING RULES\n\n---\n\nPLAYBOOK TEXT');
-      expect(h.tasks[0]!.modelContent).toBe(h.tasks[0]!.question.question);
-    } finally {
-      summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
-    }
-  });
-
-  it('falls back to default-chat when designated prompt resolution fails', async () => {
-    const h = harness();
-    h.deps.prompts = {
-      ...h.deps.prompts!,
-      list: async () => [
-        { name: 'demo-basics', title: 'Basics', description: '', tools: ['search_corpus'], systemPrompt: 'failing-chat' },
-      ],
-    };
-    h.deps.fetchFn = (async (url: string | URL | Request) => {
-      const urlStr = String(url);
-      h.urls.push(urlStr);
-      if (urlStr.includes('failing-chat')) {
-        return new Response('Not found', { status: 404 });
-      }
-      return new Response(JSON.stringify({ systemPrompt: 'DEFAULT RULES' }), { status: 200 });
-    }) as unknown as typeof fetch;
-
-    const summary = await runSuite(cfg(), () => {}, h.deps);
-    try {
-      expect(h.tasks[0]!.systemPrompt).toBe('DEFAULT RULES\n\n---\n\nPLAYBOOK TEXT');
-      expect(summary.pass).toBe(1);
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
     }
@@ -398,12 +303,10 @@ describe('runSuite — scoring version and provenance', () => {
     const summary = await runSuite(cfg(), () => {}, deps);
     try {
       const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
-      const expectedText = 'CUSTOM DESIGNATED STRUCTURED PROMPT\n\n---\n\nPLAYBOOK TEMPLATE TEXT';
+      const expectedText = 'PLAYBOOK TEMPLATE TEXT';
       const expectedSha = createHash('sha256').update(expectedText).digest('hex');
-      const defaultSha = createHash('sha256').update('DEFAULT CHAT PROMPT\n\n---\n\nPLAYBOOK TEMPLATE TEXT').digest('hex');
-      expect(meta.systemPromptName).toBe('oim-structured');
+      expect(meta.systemPromptName).toBeNull();
       expect(meta.systemPromptSha).toBe(expectedSha);
-      expect(meta.systemPromptSha).not.toBe(defaultSha);
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
     }
@@ -662,9 +565,8 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     const summary = await runSuite(runCfg, () => {}, h.deps);
     try {
       const meta = readMeta(summary.runDirs[0]!);
-      const sentPrompt = 'STRUCTURED BASE\n\n---\n\nPLAYBOOK TEMPLATE';
-      expect(meta.systemPromptName).toBe('oim-structured');
-      expect(meta.systemPromptSha).toBe(sha(sentPrompt));
+      expect(meta.systemPromptName).toBeNull();
+      expect(meta.systemPromptSha).toBe(sha('PLAYBOOK TEMPLATE'));
       expect(meta.systemPromptFallback).toBe(false);
       expect(meta.playbookPrompts).toBeNull();
       expect(meta.playbookVersion).toBe(2);
@@ -698,10 +600,9 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     const summary = await runSuite(runCfg, () => {}, h.deps);
     try {
       const meta = readMeta(summary.runDirs[0]!);
-      const expectedPrompt = 'DEFAULT BASE\n\n---\n\nPLAYBOOK TEMPLATE';
-      expect(meta.systemPromptName).toBe('default-chat');
-      expect(meta.systemPromptFallback).toBe(true);
-      expect(meta.systemPromptSha).toBe(sha(expectedPrompt));
+      expect(meta.systemPromptName).toBeNull();
+      expect(meta.systemPromptFallback).toBe(false);
+      expect(meta.systemPromptSha).toBe(sha('PLAYBOOK TEMPLATE'));
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
       rmSync(evalDir, { recursive: true, force: true });
@@ -737,15 +638,10 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     const summary = await runSuite(runCfg, () => {}, h.deps);
     try {
       const meta = readMeta(summary.runDirs[0]!);
-      const fallbackSha = sha('DEFAULT BASE\n\n---\n\nPLAYBOOK TEMPLATE');
-      const customSha = sha('CUSTOM BASE\n\n---\n\nPLAYBOOK TEMPLATE');
       expect(meta.systemPromptName).toBeNull();
-      expect(meta.systemPromptSha).toBeNull();
-      expect(meta.systemPromptVaried).toBe(true);
-      expect(meta.systemPromptFallback).toBe(true);
-      expect(meta.systemPromptShas).toHaveLength(2);
-      expect(meta.systemPromptShas).toContain(fallbackSha);
-      expect(meta.systemPromptShas).toContain(customSha);
+      expect(meta.systemPromptSha).toBe(sha('PLAYBOOK TEMPLATE'));
+      expect(meta.systemPromptVaried).toBeUndefined();
+      expect(meta.systemPromptFallback).toBe(false);
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
       rmSync(evalDir, { recursive: true, force: true });
@@ -781,12 +677,12 @@ describe('Phase 3: Prompt provenance and metadata', () => {
       const meta1 = readMeta(summary.runDirs[1]!);
       const [metaA, metaB] = meta0.playbooks.includes('pbA') ? [meta0, meta1] : [meta1, meta0];
 
-      expect(metaA.systemPromptName).toBe('promptA');
-      expect(metaA.systemPromptSha).toBe(sha('BASE A\n\n---\n\nPBA TEMPLATE'));
+      expect(metaA.systemPromptName).toBeNull();
+      expect(metaA.systemPromptSha).toBe(sha('PBA TEMPLATE'));
       expect(metaA.systemPromptFallback).toBe(false);
 
-      expect(metaB.systemPromptName).toBe('promptB');
-      expect(metaB.systemPromptSha).toBe(sha('BASE B\n\n---\n\nPBB TEMPLATE'));
+      expect(metaB.systemPromptName).toBeNull();
+      expect(metaB.systemPromptSha).toBe(sha('PBB TEMPLATE'));
       expect(metaB.systemPromptFallback).toBe(false);
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
@@ -804,8 +700,8 @@ describe('Phase 3: Prompt provenance and metadata', () => {
     try {
       const raw = readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8');
       const meta = JSON.parse(raw);
-      expect(meta.systemPromptName).toBe('default-chat');
-      expect(meta.systemPromptSha).toBe(sha('DEFAULT BASE CHAT'));
+      expect(meta.systemPromptName).toBeNull();
+      expect(meta.systemPromptSha).toBeNull();
       expect(raw).not.toContain('(none)');
       expect(meta.playbooks).toEqual([]);
       expect(meta.playbooks).not.toContain('_no_playbook');
@@ -847,18 +743,18 @@ describe('Phase 3: Prompt provenance and metadata', () => {
       expect(meta.systemPromptSha).toBeNull();
       expect(meta.playbookPrompts).toBeDefined();
       expect(meta.playbookPrompts['pb1']).toEqual({
-        systemPromptName: 'sys1',
-        systemPromptSha: sha('BASE 1\n\n---\n\nTEXT 1'),
+        systemPromptName: null,
+        systemPromptSha: sha('TEXT 1'),
         systemPromptFallback: false,
       });
       expect(meta.playbookPrompts['pb2']).toEqual({
-        systemPromptName: 'sys2',
-        systemPromptSha: sha('BASE 2\n\n---\n\nTEXT 2'),
+        systemPromptName: null,
+        systemPromptSha: sha('TEXT 2'),
         systemPromptFallback: false,
       });
       expect(meta.playbookPrompts['_no_playbook']).toEqual({
-        systemPromptName: 'default-chat',
-        systemPromptSha: sha('BASE DEFAULT'),
+        systemPromptName: null,
+        systemPromptSha: null,
         systemPromptFallback: false,
       });
     } finally {
@@ -994,16 +890,15 @@ describe('Phase 3: Prompt provenance and metadata', () => {
       const meta1 = readMeta(summary.runDirs[1]!);
       const [metaFull, metaFullIe] = summary.runDirs[0]!.includes('__full') ? [meta0, meta1] : [meta1, meta0];
 
-      // Category full had transient fallback
-      expect(metaFull.systemPromptVaried).toBe(true);
-      expect(metaFull.systemPromptFallback).toBe(true);
+      expect(metaFull.systemPromptVaried).toBeUndefined();
+      expect(metaFull.systemPromptFallback).toBe(false);
       expect(metaFull.systemPromptName).toBeNull();
+      expect(metaFull.systemPromptSha).toBe(sha('FULL TEMPLATE'));
 
-      // Category full_ie was unvaried and clean
       expect(metaFullIe.systemPromptVaried).toBeUndefined();
       expect(metaFullIe.systemPromptFallback).toBe(false);
-      expect(metaFullIe.systemPromptName).toBe('oim-full');
-      expect(metaFullIe.systemPromptSha).toBe(sha('FULL BASE\n\n---\n\nFULL TEMPLATE'));
+      expect(metaFullIe.systemPromptName).toBeNull();
+      expect(metaFullIe.systemPromptSha).toBe(sha('FULL TEMPLATE'));
     } finally {
       summary.runDirs.forEach((d) => rmSync(d, { recursive: true, force: true }));
       rmSync(evalDir, { recursive: true, force: true });
@@ -1124,8 +1019,8 @@ describe('Phase 3: Prompt provenance and metadata', () => {
       // defaultPlaybook propagated to catPlaybooks, playbookVersion (from web trace = 7), and systemPromptSha:
       expect(gsMeta.playbooks).toEqual(['oim-full']);
       expect(gsMeta.playbookVersion).toBe(7);
-      expect(gsMeta.systemPromptName).toBe('oim-full-sys');
-      expect(gsMeta.systemPromptSha).toBe(sha('FULL SYS\n\n---\n\nFULL PLAYBOOK TEXT'));
+      expect(gsMeta.systemPromptName).toBeNull();
+      expect(gsMeta.systemPromptSha).toBe(sha('FULL PLAYBOOK TEXT'));
 
       // Meanwhile results.json preserves the original spec question.playbook === null:
       const gsResults = JSON.parse(readFileSync(join(gsDir, 'results.json'), 'utf8'));
@@ -1138,8 +1033,8 @@ describe('Phase 3: Prompt provenance and metadata', () => {
       expect(rootMeta.playbooks.sort()).toEqual(['oim-coding', 'oim-full']);
       expect(Object.keys(rootMeta.playbookPrompts).sort()).toEqual(['oim-coding', 'oim-full']);
       expect(rootMeta.playbookPrompts['oim-full']).toEqual({
-        systemPromptName: 'oim-full-sys',
-        systemPromptSha: sha('FULL SYS\n\n---\n\nFULL PLAYBOOK TEXT'),
+        systemPromptName: null,
+        systemPromptSha: sha('FULL PLAYBOOK TEXT'),
         systemPromptFallback: false,
       });
     } finally {
@@ -2016,7 +1911,7 @@ describe('runSuite — production WebAnswerRunner wiring', () => {
       // Q1's late buildEvalTask did NOT record unused 'pb-q1-late' / 'prompt-q1-unused' prompt metadata:
       const meta = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'run_meta.json'), 'utf8'));
       expect(meta.playbookPrompts).toBeNull();
-      expect(meta.systemPromptName).toBe('default-chat');
+      expect(meta.systemPromptName).toBeNull();
 
       const results = JSON.parse(readFileSync(join(summary.runDirs[0]!, 'results.json'), 'utf8'));
       expect(results).toHaveLength(3);

@@ -17,7 +17,6 @@ import {
 import type { AnswerBundle } from '../agent/AnswerBundle';
 import { EvalSpecParser } from '../specs/EvalSpecParser';
 import { McpPrompts, type PromptSource, type McpPromptInfo } from '../mcp/McpPrompts';
-import { SystemPromptClient, SYSTEM_PROMPT_NAME } from '../server/SystemPromptClient';
 import { SdkAnswerRunner, type AnswerRunner } from '../agent/SdkAnswerRunner';
 import { WebAnswerRunner } from '../agent/WebAnswerRunner';
 import { MasAnswerRunner } from '../agent/MasAnswerRunner';
@@ -204,15 +203,7 @@ export async function runSuite(
       ? new ClaudeOrchestrationJudge(structuredModel, { model: cfg.reviewerModel, systemPrompt: grader.prompt })
       : null);
 
-  // The production base system prompt, so answers are produced under the same grounding and citation
-  // rules as yvoke-desktop. A failure here is fatal by design — see SystemPromptClient.get.
-  const systemPromptClient = new SystemPromptClient({ ...cfg.mcp, fetchFn: deps.fetchFn });
-  const systemPrompt = await systemPromptClient.get(SYSTEM_PROMPT_NAME);
-  log(
-    systemPrompt
-      ? `Loaded ${SYSTEM_PROMPT_NAME} system prompt from the server (${systemPrompt.length} chars).`
-      : `Server has no ${SYSTEM_PROMPT_NAME} system prompt — running with the SDK default.`,
-  );
+
 
   interface PromptEntry {
     names: Set<string>;
@@ -260,7 +251,7 @@ export async function runSuite(
   let thinkingLabel: string;
   if (cfg.mode === 'mas') {
     if (!cfg.mas) throw new Error('mas mode requires a resolved profile (cfg.mas).');
-    const orch = await buildOrchestrator(cfg.mas.profile, cfg.mas.tuning, prompts, systemPrompt, systemPromptClient);
+    const orch = await buildOrchestrator(cfg.mas.profile, cfg.mas.tuning, prompts);
     log(`Orchestrator ready: ${orch.specialistNames.length} specialists (${orch.specialistNames.join(', ')}).`);
     const masRunner =
       deps.masAnswerRunner ??
@@ -318,8 +309,6 @@ export async function runSuite(
       const task = await buildEvalTask({ ...q, playbook: effectivePlaybook }, prompts, {
         answerModel: cfg.answerModel,
         thinkingLevel: cfg.thinkingLevel,
-        systemPrompt,
-        systemPromptClient,
       });
       if (ac.signal.aborted) {
         throw ac.signal.reason ?? new Error('Aborted');
